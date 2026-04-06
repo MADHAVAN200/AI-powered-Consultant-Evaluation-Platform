@@ -23,21 +23,40 @@ const IntelligenceSidebar = ({ item, type, onClose }) => {
   // Find detailed reasoning if it's a recommendation
   const detailed = type === 'recommendation' ? detailedDecisions.find(d => d.id === item.id) : null;
 
-  const handleSendMessage = (e) => {
+  const handleSendMessage = async (e) => {
     e.preventDefault();
     if (!inputText.trim()) return;
 
-    const newMsgs = [...chatMessages, { role: 'user', text: inputText }];
-    setChatMessages(newMsgs);
+    const userMsg = { role: 'user', text: inputText };
+    setChatMessages(prev => [...prev, userMsg, { role: 'ai', text: "Adviser is thinking..." }]);
+    const currentInput = inputText;
     setInputText('');
 
-    // Simulated AI response
-    setTimeout(() => {
-      setChatMessages(prev => [...prev, {
-        role: 'ai',
-        text: `Based on the ${item.title || item.decision} data point, the primary driver is the recent shift in macro-market indicators. If we implement this, we expect a ${item.impact || 'positive'} result within the next fiscal cycle.`
-      }]);
-    }, 1000);
+    // Call Backend Groq RAG Chat
+    try {
+      const response = await fetch('http://localhost:5000/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: currentInput, decisionContext: item })
+      });
+      const data = await response.json();
+      if (data.success) {
+        setChatMessages(prev => {
+            const newMsgs = [...prev];
+            newMsgs[newMsgs.length - 1] = { role: 'ai', text: data.response };
+            return newMsgs;
+        });
+      } else {
+        throw new Error(data.error);
+      }
+    } catch (error) {
+      console.error("AI Communication Error:", error);
+      setChatMessages(prev => {
+        const newMsgs = [...prev];
+        newMsgs[newMsgs.length - 1] = { role: 'ai', text: "Our RAG systems are temporarily busy. Please retry in 5 seconds." };
+        return newMsgs;
+      });
+    }
   };
 
   return (

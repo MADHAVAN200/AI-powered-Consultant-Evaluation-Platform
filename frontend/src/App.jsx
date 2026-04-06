@@ -5,6 +5,8 @@ import DecisionsInsights from './pages/DecisionsInsights';
 import ScenarioSimulator from './pages/ScenarioSimulator';
 import DataIntegrations from './pages/DataIntegrations';
 import SystemIntelligence from './pages/SystemIntelligence';
+import LoginOverlay from './components/LoginOverlay';
+import { useData } from './context/DataContext';
 
 const navItems = [
   { path: '/', id: 'overview', label: 'OVERVIEW' },
@@ -35,6 +37,7 @@ const Sidebar = () => {
 };
 
 const TopBar = ({ theme, toggleTheme }) => {
+  const { userEmail, logoutUser } = useData();
   const location = useLocation();
   
   // Find current page label based on path
@@ -52,11 +55,23 @@ const TopBar = ({ theme, toggleTheme }) => {
         />
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', borderRight: '1px solid var(--border-default)', paddingRight: '16px', marginRight: '4px' }}>
+            <div style={{ textAlign: 'right' }}>
+                <div style={{ fontSize: '0.65rem', fontWeight: '900', opacity: 0.5, letterSpacing: '0.1em' }}>LOGGED_IN_AS</div>
+                <div style={{ fontSize: '0.75rem', fontWeight: '700', color: 'var(--accent-primary)' }}>{userEmail}</div>
+            </div>
+            <button 
+                onClick={logoutUser}
+                style={{ background: 'none', border: '1px solid var(--border-default)', borderRadius: '4px', color: 'var(--text-secondary)', fontSize: '0.6rem', padding: '4px 8px', cursor: 'pointer', fontWeight: '800' }}
+            >
+                LOGOUT
+            </button>
+        </div>
         <button className="theme-toggle" onClick={toggleTheme} style={{ fontSize: '0.7rem', fontWeight: '800', padding: '6px 12px' }}>
           {theme === 'light' ? 'DARK MODE' : 'LIGHT MODE'}
         </button>
         <div style={{ width: '32px', height: '32px', borderRadius: '50%', backgroundColor: 'var(--accent-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontWeight: 'bold', fontSize: '0.75rem' }}>
-          MD
+          {userEmail ? userEmail[0].toUpperCase() : 'MD'}
         </div>
       </div>
     </header>
@@ -64,6 +79,7 @@ const TopBar = ({ theme, toggleTheme }) => {
 };
 
 function AppContent() {
+  const { userEmail } = useData();
   const [theme, setTheme] = useState('light');
 
   const toggleTheme = () => {
@@ -75,6 +91,8 @@ function AppContent() {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', 'light');
   }, []);
+
+  if (!userEmail) return <LoginOverlay theme={theme} toggleTheme={toggleTheme} />;
 
   return (
     <div className="app-container">
@@ -95,11 +113,15 @@ function AppContent() {
   );
 }
 
+import { DataProvider } from './context/DataContext';
+
 function App() {
   return (
-    <BrowserRouter>
-      <AppContent />
-    </BrowserRouter>
+    <DataProvider>
+      <BrowserRouter>
+        <AppContent />
+      </BrowserRouter>
+    </DataProvider>
   );
 }
 

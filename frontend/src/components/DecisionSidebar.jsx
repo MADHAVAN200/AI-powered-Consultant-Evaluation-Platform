@@ -15,18 +15,39 @@ const DecisionSidebar = ({ decision, onClose }) => {
     scrollToBottom();
   }, [messages]);
 
-  const handleSend = () => {
+  const handleSend = async () => {
     if (!input.trim()) return;
 
     const userMsg = { role: 'user', text: input };
-    setMessages(prev => [...prev, userMsg]);
+    setMessages(prev => [...prev, userMsg, { role: 'ai', text: "Adviser is thinking..." }]);
+    const currentInput = input;
     setInput('');
 
-    // Simulate AI Response
-    setTimeout(() => {
-      const aiResponse = generateAIResponse(input, decision);
-      setMessages(prev => [...prev, { role: 'ai', text: aiResponse }]);
-    }, 1000);
+    // Call Backend Groq RAG Chat
+    try {
+      const response = await fetch('http://localhost:5000/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: currentInput, decisionContext: decision })
+      });
+      const data = await response.json();
+      if (data.success) {
+        setMessages(prev => {
+            const newMsgs = [...prev];
+            newMsgs[newMsgs.length - 1] = { role: 'ai', text: data.response };
+            return newMsgs;
+        });
+      } else {
+        throw new Error(data.error);
+      }
+    } catch (error) {
+      console.error("AI Communication Error:", error);
+      setMessages(prev => {
+        const newMsgs = [...prev];
+        newMsgs[newMsgs.length - 1] = { role: 'ai', text: "Our RAG systems are temporarily busy. Please retry in 5 seconds." };
+        return newMsgs;
+      });
+    }
   };
 
   const generateAIResponse = (query, data) => {
@@ -47,13 +68,24 @@ const DecisionSidebar = ({ decision, onClose }) => {
     <>
       <div className="sidebar-overlay" onClick={onClose}></div>
       <div className="decision-sidebar">
-        <div className="sidebar-header">
+        <div className="sidebar-header" style={{ borderBottom: '1px solid var(--border-default)', paddingBottom: '24px' }}>
           <div>
-            <h2 style={{ fontSize: '1.25rem', fontWeight: '800', marginBottom: '4px' }}>{decision.title}</h2>
-            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-              <span style={{ color: '#52c41a', fontWeight: '700', fontSize: '0.85rem' }}>{decision.impact}</span>
-              <span className={`badge badge-${decision.risk.toLowerCase()}`}>RISK: {decision.risk}</span>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px' }}>
+              <span style={{ 
+                padding: '4px 10px', 
+                borderRadius: '6px', 
+                fontSize: '0.6rem', 
+                fontWeight: '900', 
+                backgroundColor: 'rgba(255,255,255,0.05)', 
+                color: 'var(--accent-primary)',
+                border: '1px solid var(--accent-primary)',
+                letterSpacing: '0.1em'
+              }}>
+                {decision.perspective?.toUpperCase()}
+              </span>
+              <span style={{ fontSize: '0.65rem', fontWeight: '800', opacity: 0.5 }}>[{decision.impact}]</span>
             </div>
+            <h2 style={{ fontSize: '1.4rem', fontWeight: '900', lineHeight: '1.2' }}>{decision.title}</h2>
           </div>
           <button 
             onClick={onClose}
@@ -75,12 +107,16 @@ const DecisionSidebar = ({ decision, onClose }) => {
           <section>
             <h3 style={{ fontSize: '0.75rem', fontWeight: '700', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '12px' }}>Simulation Outcomes</h3>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {Object.entries(decision.simulation).map(([key, val]) => (
+              {decision?.simulation ? Object.entries(decision.simulation).map(([key, val]) => (
                 <div key={key} className="sim-outcome" style={{ padding: '12px', border: '1px solid var(--border-default)', borderRadius: '8px' }}>
                   <span style={{ fontSize: '0.7rem', fontWeight: '700', textTransform: 'uppercase', opacity: 0.7 }}>{key}</span>
                   <span style={{ fontWeight: '700', color: key === 'worst' ? '#ff4d4f' : key === 'best' ? '#52c41a' : 'inherit' }}>{val}</span>
                 </div>
-              ))}
+              )) : (
+                <div style={{ padding: '20px', textAlign: 'center', border: '1px dashed var(--border-default)', borderRadius: '12px', opacity: 0.5, fontSize: '0.75rem' }}>
+                   No simulation data available for this decision.
+                </div>
+              )}
             </div>
           </section>
 
