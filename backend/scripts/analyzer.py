@@ -68,9 +68,9 @@ def analyze_dataset(data_json):
                     if abs(val) > 0.75:
                         correlations.append(f"{col1} vs {col2}: {val:.2f}")
 
-        # 4. Critical Peaks (SQL Logic)
+        # 4. Critical Peaks (SQL Logic) - Limit to 12
         peaks = {}
-        for col in numeric_cols:
+        for col in numeric_cols[:12]:
             idx = df[col].idxmax()
             row = df.loc[idx]
             peaks[col] = {
@@ -78,14 +78,17 @@ def analyze_dataset(data_json):
                 "date": str(row.get('created_at', 'N/A'))
             }
 
-        return {
+        result = {
             "status": "SUCCESS",
             "rowCount": len(df),
-            "kpiSummaries": summary,
-            "correlations": correlations[:5],
-            "peaks": peaks,
-            "latestRow": df.iloc[0].to_dict()
+            "numericColumns": numeric_cols[:12],
+            "kpiSummaries": {k: v for k, v in list(summary.items())[:12]},
+            "correlations": correlations[:3],
+            "peaks": peaks
+            # latestRow removed (already in Node metrics)
         }
+
+        return result
 
     except Exception as e:
         return {"status": "ERROR", "message": str(e)}
