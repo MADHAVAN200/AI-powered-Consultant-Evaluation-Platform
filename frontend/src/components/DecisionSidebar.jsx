@@ -100,21 +100,64 @@ const DecisionSidebar = ({ decision, onClose }) => {
             <h3 style={{ fontSize: '0.75rem', fontWeight: '700', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '12px' }}>Detailed Analysis</h3>
             <div style={{ padding: '16px', backgroundColor: 'var(--bg-subtle)', borderRadius: '12px', border: '1px solid var(--border-default)', fontSize: '0.875rem', lineHeight: '1.5' }}>
               <p style={{ fontWeight: '700', marginBottom: '8px', color: 'var(--accent-primary)' }}>AI Reasoning:</p>
-              <p>{decision.why}</p>
+              <p>{decision.why?.replace(/\[(AUDIT|STRATEGY|GUARD)\]/gi, '').trim()}</p>
             </div>
           </section>
 
           <section>
-            <h3 style={{ fontSize: '0.75rem', fontWeight: '700', color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '12px' }}>Simulation Outcomes</h3>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {decision?.simulation ? Object.entries(decision.simulation).map(([key, val]) => (
-                <div key={key} className="sim-outcome" style={{ padding: '12px', border: '1px solid var(--border-default)', borderRadius: '8px' }}>
-                  <span style={{ fontSize: '0.7rem', fontWeight: '700', textTransform: 'uppercase', opacity: 0.7 }}>{key}</span>
-                  <span style={{ fontWeight: '700', color: key === 'worst' ? '#ff4d4f' : key === 'best' ? '#52c41a' : 'inherit' }}>{val}</span>
-                </div>
-              )) : (
-                <div style={{ padding: '20px', textAlign: 'center', border: '1px dashed var(--border-default)', borderRadius: '12px', opacity: 0.5, fontSize: '0.75rem' }}>
-                   No simulation data available for this decision.
+            <h3 style={{ fontSize: '0.75rem', fontWeight: '900', color: 'var(--accent-primary)', textTransform: 'uppercase', marginBottom: '16px', letterSpacing: '0.1em' }}>
+              AI DATA-DRIVEN STRATEGIC PROJECTIONS
+            </h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {decision?.simulation ? Object.entries(decision.simulation).map(([key, val]) => {
+                const labels = {
+                  exp: { 
+                    title: 'EXPECTED STRATEGIC BASELINE', 
+                    sub: 'The statistically most probable trajectory based on current enterprise velocity and historical performance regression. Assumes stable execution without major pivots.', 
+                    color: '#1890ff', 
+                    icon: '⚙️' 
+                  },
+                  best: { 
+                    title: 'AI-OPTIMIZED BEST CASE', 
+                    sub: 'A high-alpha trajectory modeling optimized efficiency, successful strategic hedging, and upper-quartile favorable market conditions.', 
+                    color: '#52c41a', 
+                    icon: '📈' 
+                  },
+                  worst: { 
+                    title: 'CRITICAL RISK MITIGATION', 
+                    sub: 'A high-fidelity stress-test modeling severe outcome variables such as policy shocks, talent attrition, or competitive price wars for proactive defense.', 
+                    color: '#ff4d4f', 
+                    icon: '🛡️' 
+                  }
+                };
+                const config = labels[key.toLowerCase()] || { title: key.toUpperCase(), sub: 'Projected Outcome', color: 'var(--text-secondary)', icon: '●' };
+                
+                return (
+                  <div key={key} className="sim-outcome-card" style={{ 
+                    padding: '16px', 
+                    background: 'rgba(255, 255, 255, 0.02)', 
+                    border: '1px solid var(--border-default)', 
+                    borderLeft: `4px solid ${config.color}`,
+                    borderRadius: '12px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '8px',
+                    transition: 'transform 0.2s ease'
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ fontSize: '1.2rem' }}>{config.icon}</span>
+                        <span style={{ fontSize: '0.7rem', fontWeight: '900', color: config.color, letterSpacing: '0.05em' }}>{config.title}</span>
+                      </div>
+                    </div>
+                    <div style={{ fontWeight: '800', fontSize: '1.1rem', color: 'var(--text-primary)' }}>{val}</div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', opacity: 0.8, lineHeight: '1.4' }}>{config.sub}</div>
+                  </div>
+                );
+              }) : (
+                <div style={{ padding: '32px', textAlign: 'center', border: '1px dashed var(--border-default)', borderRadius: '16px', opacity: 0.5 }}>
+                   <div style={{ fontSize: '1.5rem', marginBottom: '8px' }}>📊</div>
+                   <div style={{ fontSize: '0.75rem', fontWeight: '800' }}>INITIALIZING PREDICTIVE ENGINE...</div>
                 </div>
               )}
             </div>

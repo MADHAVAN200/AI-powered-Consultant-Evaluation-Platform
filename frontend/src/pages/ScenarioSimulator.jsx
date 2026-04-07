@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { simulationVariables, simulationKPIs } from '../data/DashboardData';
 import SimulationSidebar from '../components/SimulationSidebar';
+import { useData } from '../context/DataContext';
 
 const ScenarioSimulator = () => {
+  const { enterpriseData, hasData } = useData();
   const [values, setValues] = useState({});
   const [deltas, setDeltas] = useState({});
   const [selectedOutcome, setSelectedOutcome] = useState(null);
@@ -36,31 +38,56 @@ const ScenarioSimulator = () => {
     setDeltas(newDeltas);
   };
 
+  const formatIndianNumber = (num, isCurrency = true) => {
+    if (!num && num !== 0) return 'N/A';
+    const formatter = new Intl.NumberFormat('en-IN', {
+      style: isCurrency ? 'currency' : 'decimal',
+      currency: 'INR',
+      maximumFractionDigits: 1
+    });
+
+    if (num >= 10000000) {
+      return `${isCurrency ? '₹' : ''}${(num / 10000000).toFixed(2)} Cr`;
+    } else if (num >= 100000) {
+      return `${isCurrency ? '₹' : ''}${(num / 100000).toFixed(2)} L`;
+    }
+    return formatter.format(num);
+  };
+
   const categories = [...new Set(simulationVariables.map(v => v.category))];
 
   const outcomes = [
     { 
       id: 'A',
       title: 'Optimistic', 
-      impact: 'Profit ↑ 10.2%', 
+      impact: `Profit ↑ ${formatIndianNumber(enterpriseData.Profit * 1.1)}`, 
       color: '#52c41a', 
       description: 'High market absorption allows price hike without significant churn. Efficiency gains from production shifts offset wage increases.' 
     },
     { 
       id: 'B',
       title: 'Expected', 
-      impact: 'Profit ↑ 4.5%', 
+      impact: `Profit ↑ ${formatIndianNumber(enterpriseData.Profit * 1.05)}`, 
       color: 'var(--accent-primary)', 
       description: 'Moderate demand elasticity results in 2% volume drop. Supply chain consolidation savings provide secondary support.' 
     },
     { 
       id: 'C',
       title: 'Pessimistic', 
-      impact: 'Profit ↓ 2.1%', 
+      impact: `Profit ↓ ${formatIndianNumber(enterpriseData.Profit * 0.95)}`, 
       color: '#ff4d4f', 
       description: 'Competitor counter-action triggers price war. Inflation shock impacts raw material costs more severely than predicted.' 
     }
   ];
+  if (!hasData) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', flexDirection: 'column', gap: '24px', opacity: 0.5 }}>
+        <div style={{ fontSize: '4rem' }}>⏳</div>
+        <div style={{ fontSize: '0.8rem', fontWeight: '900', letterSpacing: '0.3em' }}>AWAITING MARKET ANALYSIS...</div>
+        <p style={{ fontSize: '0.75rem', maxWidth: '400px', textAlign: 'center' }}>Connect your dataset to activate the predictive multi-outcome engine and simulate strategic variables.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="simulator-container" style={{ position: 'relative' }}>

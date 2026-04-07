@@ -39,7 +39,7 @@ const SYNC_MESSAGES = [
 ];
 
 const DataPushSidebar = ({ onClose }) => {
-  const { updateMetrics } = useData();
+  const { updateMetrics, setIsBatching, runEnrichedAnalysis } = useData();
   const [step, setStep] = useState('SELECT'); // SELECT, CONFIGURE, SYNCING
   const [selectedTool, setSelectedTool] = useState(null);
   const [progress, setProgress] = useState(0);
@@ -80,6 +80,7 @@ const DataPushSidebar = ({ onClose }) => {
   const handleManualUpload = async () => {
     if (files.length === 0) return;
     setStep('SYNCING');
+    setIsBatching(true); // SILENCE AI during batch
 
     for (let i = 0; i < files.length; i++) {
         const file = files[i];
@@ -91,38 +92,43 @@ const DataPushSidebar = ({ onClose }) => {
                 header: true,
                 dynamicTyping: true,
                 complete: (results) => {
-                    const parsedData = results.data[0];
+                    const validRows = results.data.filter(r => r && Object.keys(r).length > 2);
+                    const patterns = /date|time|period|month|year|week/i;
+                    const headers = results.meta?.fields || [];
+                    const dateCol = headers.find(h => patterns.test(h));
+
+                    const sorted = dateCol 
+                      ? [...validRows].sort((a, b) => new Date(b[dateCol]) - new Date(a[dateCol]))
+                      : validRows;
+
+                    const parsedData = sorted.length > 0 ? sorted[0] : null;
+
                     if (parsedData) {
                         let p = 0;
                         const interval = setInterval(() => {
-                            p += 10;
-                            setProgress(p * ((i + 1) / files.length)); // Global progress
+                            p += 20;
+                            setProgress(p * ((i + 1) / files.length)); 
                             if (p >= 100) {
                                 clearInterval(interval);
-                                updateMetrics(parsedData, results.data);
+                                updateMetrics(parsedData, sorted);
                                 resolve();
                             }
-                        }, 50);
+                        }, 20);
                     } else {
                         resolve();
                     }
-                },
-                error: (error) => {
-                    console.error("Parse error:", error);
-                    resolve(); 
                 }
             });
         });
-
-        // RATE LIMIT MITIGATION: 10s Cooldown for Groq TPM
-        if (i < files.length - 1) {
-            setSyncStatus(`Cooling down AI for rate limits (10s)... [${i + 2}/${files.length} Next]`);
-            await new Promise(r => setTimeout(r, 10000));
-        }
     }
 
-    setSyncStatus("Batch Ingestion Complete.");
+    setSyncStatus("Ingestion Complete. Generating Final Strategic Insights...");
     setProgress(100);
+    
+    // FINAL CONSOLIDATED TRIGGER
+    await runEnrichedAnalysis(true); 
+    setIsBatching(false);
+
     setTimeout(() => onClose(), 1000);
   };
 

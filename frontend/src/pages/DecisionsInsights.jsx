@@ -46,7 +46,7 @@ const DecisionCard = ({ decision, onClick }) => {
         </div>
       </div>
       <div style={{ marginTop: '16px', fontSize: '0.8rem', opacity: 0.8, color: 'var(--text-secondary)', lineHeight: '1.6' }}>
-        {decision.why.substring(0, 180)}...
+        {decision.why?.replace(/\[(AUDIT|STRATEGY|GUARD)\]/gi, '').trim().substring(0, 180)}...
       </div>
     </div>
   );
@@ -56,7 +56,6 @@ const DecisionsInsights = () => {
   const { userEmail } = useData();
   const [allDecisions, setAllDecisions] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [filter, setFilter] = useState('All');
   const [perspectiveFilter, setPerspectiveFilter] = useState('All');
   const [selectedDecision, setSelectedDecision] = useState(null);
 
@@ -81,22 +80,13 @@ const DecisionsInsights = () => {
   }, [fetchAllDecisions]);
 
   const filteredDecisions = allDecisions.filter(d => {
-    const riskMatch = filter === 'All' || d.risk === filter;
-    const perspectiveMatch = perspectiveFilter === 'All' || d.perspective === perspectiveFilter;
-    return riskMatch && perspectiveMatch;
+    return perspectiveFilter === 'All' || d.perspective === perspectiveFilter;
   });
 
-  if (isLoading) {
-    return (
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '60vh', flexDirection: 'column', gap: '24px' }}>
-        <div className="loader"></div>
-        <div style={{ fontSize: '0.8rem', fontWeight: '900', opacity: 0.5, letterSpacing: '0.3em' }}>UNROLLING MASTER STRATEGY REPOSITORY...</div>
-      </div>
-    );
-  }
+  // Inline skeletons handled in the main render
 
   return (
-    <div style={{ height: 'calc(100vh - 120px)', display: 'flex', flexDirection: 'column', position: 'relative' }}>
+    <div style={{ flex: 1, height: '100%', display: 'flex', flexDirection: 'column', position: 'relative', paddingBottom: '12px' }}>
       {/* Header & Controls */}
       <div style={{ padding: '0 0 24px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <div style={{ display: 'flex', gap: '20px' }}>
@@ -127,42 +117,38 @@ const DecisionsInsights = () => {
         <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
           <button 
              onClick={fetchAllDecisions}
-             style={{ padding: '6px 12px', border: 'none', background: 'var(--accent-primary)', color: 'white', borderRadius: '4px', fontSize: '0.7rem', fontWeight: '800', cursor: 'pointer', marginRight: '12px' }}
+             style={{ padding: '6px 12px', border: 'none', background: 'var(--accent-primary)', color: 'white', borderRadius: '4px', fontSize: '0.7rem', fontWeight: '400', cursor: 'pointer' }}
           >
-             REFRESH REPOSITORY
+             Refresh
           </button>
-          <span style={{ fontSize: '0.7rem', fontWeight: '900', opacity: 0.5, letterSpacing: '0.1em' }}>QUICK FILTER:</span>
-          {['All', 'Low', 'Med', 'High'].map(r => (
-            <button 
-              key={r}
-              style={{
-                padding: '6px 14px',
-                borderRadius: '6px',
-                border: '1px solid var(--border-default)',
-                background: filter === r ? 'var(--accent-primary)' : 'var(--bg-card)',
-                color: filter === r ? 'white' : 'var(--text-primary)',
-                fontSize: '0.7rem',
-                fontWeight: '900',
-                cursor: 'pointer'
-              }}
-              onClick={() => setFilter(r)}
-            >
-              {r.toUpperCase()}
-            </button>
-          ))}
         </div>
       </div>
 
       {/* Main Content */}
       <div style={{ flex: 1, overflowY: 'auto', paddingRight: '4px' }}>
         <div className="decisions-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(360px, 1fr))', gap: '24px' }}>
-          {filteredDecisions.map(d => (
-            <DecisionCard 
-              key={d.id} 
-              decision={d} 
-              onClick={() => setSelectedDecision(d)} 
-            />
-          ))}
+          {isLoading ? (
+            [1, 2, 3, 4, 5, 6].map(i => (
+              <div key={i} className="decision-card" style={{ padding: '24px', opacity: 0.6 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '16px' }}>
+                  <div className="skeleton" style={{ width: '80px', height: '24px' }}></div>
+                  <div className="skeleton" style={{ width: '120px', height: '14px' }}></div>
+                </div>
+                <div className="skeleton-title skeleton" style={{ width: '90%' }}></div>
+                <div className="skeleton-rect skeleton" style={{ height: '40px', margin: '16px 0', borderRadius: '8px' }}></div>
+                <div className="skeleton-text skeleton"></div>
+                <div className="skeleton-text skeleton" style={{ width: '60%' }}></div>
+              </div>
+            ))
+          ) : (
+            filteredDecisions.map(d => (
+              <DecisionCard 
+                key={d.id} 
+                decision={d} 
+                onClick={() => setSelectedDecision(d)} 
+              />
+            ))
+          )}
           {filteredDecisions.length === 0 && (
               <div style={{ gridColumn: '1 / -1', padding: '60px', textAlign: 'center', border: '1px dashed var(--border-default)', borderRadius: '20px', opacity: 0.4 }}>
                   <div style={{ fontSize: '2rem', marginBottom: '16px' }}>🛡️</div>

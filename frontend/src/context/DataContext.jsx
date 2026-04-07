@@ -6,19 +6,29 @@ const DataContext = createContext();
 export const DataProvider = ({ children }) => {
   const [userEmail, setUserEmail] = useState(localStorage.getItem('userEmail') || null);
   const [enterpriseData, setEnterpriseData] = useState({
-    Revenue: 12400000,
-    Cost: 8200000,
-    Profit: 4200000,
-    Margin: 34,
-    AttritionRate: 4.2,
-    ChurnRate: 4.1,
-    LogisticsCost: 1450000
+    Revenue: 0,
+    Cost: 0,
+    Profit: 0,
+    Margin: 0,
+    AttritionRate: 0,
+    ChurnRate: 0,
+    LogisticsCost: 0
   });
 
   const [globalSignals, setGlobalSignals] = useState([]);
   const [historicalMetrics, setHistoricalMetrics] = useState([]);
   const [intelligence, setIntelligence] = useState({ insights: [], recommendations: [] });
   const [isLoading, setIsLoading] = useState(false);
+  const [isBatching, setIsBatching] = useState(false);
+  const [metadata, setMetadata] = useState({ columnCount: 0, rowCount: 0, mode: 'INITIALIZING' });
+  const [systemStatus, setSystemStatus] = useState({
+    api: 'OFFLINE',
+    supabase: 'OFFLINE',
+    groq: 'OFFLINE',
+    lastSync: null
+  });
+
+  const hasData = historicalMetrics && historicalMetrics.length > 0;
 
   // Fetch Global Signals from Supabase
   const fetchGlobalSignals = useCallback(async () => {
@@ -27,9 +37,26 @@ export const DataProvider = ({ children }) => {
       const data = await response.json();
       if (data.success) {
         setGlobalSignals(data.signals || []);
+        setSystemStatus(prev => ({ ...prev, lastSync: new Date().toISOString() }));
       }
     } catch (error) {
       console.error("Failed to fetch global signals:", error);
+    }
+  }, []);
+
+  // Periodic Health Check
+  const checkSystemHealth = useCallback(async () => {
+    try {
+      const response = await fetch('http://localhost:5000/api/health');
+      const data = await response.json();
+      setSystemStatus(prev => ({
+        ...prev,
+        api: data.status === 'OK' ? 'ONLINE' : 'ERROR',
+        supabase: data.supabaseConnected ? 'ONLINE' : 'OFFLINE',
+        groq: data.groqConnected ? 'ONLINE' : 'OFFLINE'
+      }));
+    } catch (error) {
+      setSystemStatus(prev => ({ ...prev, api: 'OFFLINE', supabase: 'OFFLINE', groq: 'OFFLINE' }));
     }
   }, []);
 
@@ -52,17 +79,16 @@ export const DataProvider = ({ children }) => {
       const data = await response.json();
       if (data.success) {
         setHistoricalMetrics(data.metrics || []);
-        // If we have historical data, set the latest as current
         if (data.metrics && data.metrics.length > 0) {
           const latest = data.metrics[0];
           setEnterpriseData({
-            Revenue: latest.revenue,
-            Cost: latest.cost,
-            Profit: latest.profit,
-            Margin: latest.margin,
-            AttritionRate: latest.attrition,
-            ChurnRate: latest.churn_rate,
-            LogisticsCost: latest.logistics_cost
+            Revenue: latest.revenue || 0,
+            Cost: latest.cost || 0,
+            Profit: latest.profit || 0,
+            Margin: latest.margin || 0,
+            AttritionRate: latest.attrition || 0,
+            ChurnRate: latest.churn_rate || 0,
+            LogisticsCost: latest.logistics_cost || 0
           });
         }
       }
@@ -80,15 +106,17 @@ export const DataProvider = ({ children }) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: userEmail, metrics, rawData })
       });
-      fetchHistory(); // Refresh history after save
+      fetchHistory();
     } catch (error) {
       console.error("Failed to save snapshot:", error);
     }
   };
 
-  // Update backend with new analysis whenever metrics/signals change
-  const runEnrichedAnalysis = useCallback(async () => {
+  // Run AI analysis
+  const runEnrichedAnalysis = useCallback(async (isFinalBatch = false) => {
     if (!userEmail) return;
+    if (isBatching && !isFinalBatch) return;
+
     setIsLoading(true);
     try {
       const response = await fetch('http://localhost:5000/api/analyze', {
@@ -97,15 +125,17 @@ export const DataProvider = ({ children }) => {
         body: JSON.stringify({ 
           email: userEmail, 
           metrics: enterpriseData, 
-          history: historicalMetrics.slice(0, 50), // Send last 50 snapshots
+          history: historicalMetrics.slice(0, 20), 
           activeSignals: globalSignals 
         })
       });
       const data = await response.json();
       if (data.success) {
         setIntelligence(data.analysis);
+        if (data.analysis.metadata) {
+            setMetadata(data.metadata || { columnCount: 0, rowCount: 0, mode: 'PANDAS_CORE' });
+        }
       } else {
-        // Fallback to local engine if backend fails
         const localResults = analyzeData(enterpriseData, globalSignals);
         setIntelligence(localResults);
       }
@@ -116,23 +146,25 @@ export const DataProvider = ({ children }) => {
     } finally {
       setIsLoading(false);
     }
-  }, [enterpriseData, globalSignals, userEmail]);
+  }, [enterpriseData, globalSignals, userEmail, isBatching, historicalMetrics]);
 
-  // Initial fetch on login
   useEffect(() => {
     if (userEmail) {
       fetchHistory();
       fetchGlobalSignals();
+      checkSystemHealth();
+      const interval = setInterval(checkSystemHealth, 30000); // Check every 30s
+      return () => clearInterval(interval);
     }
-  }, [userEmail, fetchHistory, fetchGlobalSignals]);
+  }, [userEmail, fetchHistory, fetchGlobalSignals, checkSystemHealth]);
 
-  // Debounced analysis run
   useEffect(() => {
+    if (isBatching) return;
     const timer = setTimeout(() => {
       runEnrichedAnalysis();
-    }, 1000);
+    }, 5000);
     return () => clearTimeout(timer);
-  }, [enterpriseData, globalSignals, runEnrichedAnalysis]);
+  }, [enterpriseData, globalSignals, runEnrichedAnalysis, isBatching]);
 
   const updateMetrics = (newData, rawData = null) => {
     setEnterpriseData(prev => ({ ...prev, ...newData }));
@@ -154,7 +186,7 @@ export const DataProvider = ({ children }) => {
       });
       const data = await response.json();
       if (data.success) {
-        fetchHistory(); // Refresh the list
+        fetchHistory();
       }
     } catch (error) {
       console.error("Failed to delete snapshot:", error);
@@ -173,7 +205,12 @@ export const DataProvider = ({ children }) => {
       updateMetrics, 
       deleteSnapshot,
       toggleSignal,
-      isLoading 
+      isLoading,
+      setIsBatching,
+      runEnrichedAnalysis,
+      hasData,
+      systemStatus,
+      metadata
     }}>
       {children}
     </DataContext.Provider>

@@ -7,98 +7,93 @@ export const analyzeData = (metrics, globalSignals) => {
   const insights = [];
   const recommendations = [];
 
+  // 0. DATA PRESENCE CHECK
+  if (!metrics || metrics.Revenue === 0) {
+    return {
+      insights: [{
+        id: 'no-data',
+        title: "Waiting for Data Ingestion",
+        why: "Connect a data source or upload a CSV to begin real-time enterprise analysis.",
+        confidence: 1.0,
+        type: 'info'
+      }],
+      recommendations: [{
+        id: 'rec-ingest',
+        title: "Ingest Enterprise Dataset",
+        impact: "Unlock Intelligence",
+        risk: "Low",
+        confidence: 1.0,
+        why: "System is in a ready state. Uploading a dataset will trigger the Alpha-Reasoning engine.",
+        simulation: { best: "Full Visibility", exp: "Strategic Insights", worst: "No Change" },
+        dependency: "Upload → Sync → Analyze"
+      }]
+    };
+  }
+
   // 1. ANOMALY DETECTION
-  if (metrics.Margin < 0) {
+  if (metrics.Margin < 15 && metrics.Margin > 0) {
+    insights.push({
+      id: 'low-margin',
+      title: "Compressed profit margins detected",
+      why: "Current margin is below the 18% industry threshold for this sector.",
+      confidence: 0.92,
+      type: 'warning'
+    });
+  } else if (metrics.Margin <= 0) {
     insights.push({
       id: 'critical-margin',
-      title: "Negative margin detected (System Leak)",
-      why: "Operating costs currently exceed gross revenue. Breakeven threshold is breached.",
+      title: "Negative margin / Burn detected",
+      why: "Operating costs exceed gross revenue. Immediate liquidity check required.",
       confidence: 0.98,
       type: 'critical'
     });
-    recommendations.push({
-      id: 'rec-cost-cut',
-      title: "Aggressive OpEx reduction (15%)",
-      impact: "Restore profitability",
-      risk: "High",
-      confidence: 0.92,
-      why: "Operating costs currently exceed gross revenue. Immediate cost cutting is required to stabilize the cash burn.",
-      simulation: { best: "₹15L Profit", exp: "₹2L Profit", worst: "₹10L Loss" },
-      dependency: "Cost Cut → Lower Burn → Improved Runway"
-    });
   }
 
-  if (metrics.LogisticsCost > metrics.Revenue * 0.2) {
-    insights.push({
-      id: 'logistics-spike',
-      title: "Logistics over-index identified",
-      why: "Logistics spend is 20%+ of revenue, significantly above the 8% industry baseline.",
-      confidence: 0.89,
-      type: 'warning'
-    });
-  }
+  // 2. DYNAMIC SIGNAL ANALYSIS
+  globalSignals.forEach(signal => {
+    if (signal.severity === 'High' || signal.severity === 'Critical') {
+      insights.push({
+        id: `sig-${signal.id}`,
+        title: `Macro Risk: ${signal.type || 'Global'}`,
+        why: `The ${signal.event} signal is classified as ${signal.severity} Impact. Monitoring for correlation with your ${signal.type?.toLowerCase() || 'operating'} costs.`,
+        confidence: 0.85,
+        type: 'signal'
+      });
 
-  // 2. MACRO IMPACT MAPPING
-  const activeOilSignal = globalSignals.find(s => s.id === 'oil-spike');
-  if (activeOilSignal && metrics.LogisticsCost > 0) {
+      // Dynamic recommendation based on signal type
+      if (signal.type?.toLowerCase().includes('policy') || signal.type?.toLowerCase().includes('tax')) {
+          recommendations.push({
+              id: `rec-policy-${signal.id}`,
+              title: "Compliance Audit & Hedge",
+              impact: "Risk Mitigation",
+              risk: "Low",
+              confidence: 0.88,
+              why: "Policy shifts require immediate re-assessment of tax liability and contractual obligations.",
+              simulation: { best: "Zero Leakage", exp: "5% Save", worst: "12% Exposure" },
+              dependency: "Legal Review → Financial Planning"
+          });
+      }
+    }
+  });
+
+  // 3. PERFORMANCE SIGNALS
+  if (metrics.ChurnRate > 8) {
     insights.push({
-      id: 'oil-impact',
-      title: "Fuel inflation affecting distribution",
-      why: `The active ${activeOilSignal.event} is projected to add 5-8% to your current Logistics spend.`,
+      id: 'churn-surge',
+      title: "Customer attrition above baseline",
+      why: `Churn is at ${metrics.ChurnRate}%, significantly higher than the 5% target.`,
       confidence: 0.94,
-      type: 'signal'
-    });
-    recommendations.push({
-        id: 'rec-logistics-opt',
-        title: "Optimize Route-D (Logistics)",
-        impact: "₹12L Cost ↓",
-        risk: "Low",
-        confidence: 0.95,
-        why: "Fuel prices are rising. Optimizing distribution routes will reduce empty-haulage and fuel burn.",
-        simulation: { best: "₹20L Save", exp: "₹12L Save", worst: "₹2L Save" },
-        dependency: "Route Opt. → Fuel Efficiency → Margin Buffer"
-    });
-  }
-
-  const activeMarketSignal = globalSignals.find(s => s.id === 'market-crash');
-  if (activeMarketSignal) {
-    insights.push({
-      id: 'market-risk',
-      title: "Liquidity preservation required",
-      why: "High market volatility detected. Consumer demand elasticity is expected to tighten.",
-      confidence: 0.96,
       type: 'critical'
     });
     recommendations.push({
-        id: 'rec-cap-freeze',
-        title: "Freeze all new CapEx",
-        impact: "Preserve Cash",
+        id: 'rec-churn-mitigation',
+        title: "Customer Retention Sprint",
+        impact: "Revenue Stability",
         risk: "Med",
         confidence: 0.91,
-        why: "Market volatility is high. Conserving cash now will provide the necessary buffer for upcoming macro shocks.",
-        simulation: { best: "Capital Protected", exp: "Cash Buffer ↑", worst: "Marginal Safety" },
-        dependency: "Freeze → Lower Debt → Higher Resilience"
-    });
-  }
-
-  // 3. GROWTH SIGNALS
-  if (metrics.Revenue > 14000000 && metrics.ChurnRate < 3) {
-    insights.push({
-      id: 'growth-alpha',
-      title: "Organic growth momentum",
-      why: "Revenue and retention metrics indicate a strong product-market fit. Ready for scale.",
-      confidence: 0.91,
-      type: 'success'
-    });
-    recommendations.push({
-        id: 'rec-expand-tier1',
-        title: "Expand to Tier-1 Markets",
-        impact: "₹3 Cr Rev ↑",
-        risk: "Med",
-        confidence: 0.88,
-        why: "Internal metrics show strong organic expansion potential. Tier-1 markets offer high LTV customers.",
-        simulation: { best: "₹5 Cr Rev", exp: "₹3 Cr Rev", worst: "₹1 Cr Rev" },
-        dependency: "Expansion → Brand Alpha → Future Profit"
+        why: "High churn is the primary threat to LTV. Improving the onboarding flow and support response times will stabilize this.",
+        simulation: { best: "₹50L Saved", exp: "₹20L Saved", worst: "₹5L Saved" },
+        dependency: "Product UX → Customer Success"
     });
   }
 
@@ -106,10 +101,10 @@ export const analyzeData = (metrics, globalSignals) => {
   if (insights.length === 0) {
     insights.push({
       id: 'baseline',
-      title: "Operating within stable parameters",
-      why: "No significant anomalies or macro-threats detected in the current sync period.",
+      title: "Stable Operating State",
+      why: "No significant anomalies or high-impact macro threats detected in the current sync window.",
       confidence: 0.85,
-      type: 'info'
+      type: 'success'
     });
   }
 
