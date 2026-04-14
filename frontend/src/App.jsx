@@ -1,26 +1,33 @@
 import React, { useState, useEffect } from 'react';
-import { BrowserRouter, Routes, Route, NavLink, useLocation } from 'react-router-dom';
-import OverviewDashboard from './pages/OverviewDashboard';
-import DecisionsInsights from './pages/DecisionsInsights';
-import ScenarioSimulator from './pages/ScenarioSimulator';
-import DataIntegrations from './pages/DataIntegrations';
-import SystemIntelligence from './pages/SystemIntelligence';
+import { BrowserRouter, Routes, Route, NavLink, Navigate, useLocation } from 'react-router-dom';
+import AdminDashboard from './pages/AdminDashboard';
+import AdminEvaluation from './pages/AdminEvaluation';
+import AdminResults from './pages/AdminResults';
+import CandidateDashboard from './pages/CandidateDashboard';
+import CandidateCaseStudies from './pages/CandidateCaseStudies';
+import CandidateResults from './pages/CandidateResults';
+import CandidateAssessment from './pages/CandidateAssessment';
 import LoginOverlay from './components/LoginOverlay';
 import { useData, DataProvider } from './context/DataContext';
 
-const navItems = [
-  { path: '/', id: 'overview', label: 'OVERVIEW' },
-  { path: '/decisions', id: 'decisions', label: 'DECISIONS & INSIGHTS' },
-  { path: '/simulator', id: 'simulator', label: 'SCENARIO SIMULATOR' },
-  { path: '/data', id: 'data', label: 'DATA & INTEGRATIONS' },
-  { path: '/intelligence', id: 'intelligence', label: 'SYSTEM INTELLIGENCE' },
+const adminNavItems = [
+  { path: '/admin/dashboard', id: 'dashboard', label: 'DASHBOARD' },
+  { path: '/admin/cases', id: 'cases', label: 'CASE STUDIES' },
+  { path: '/admin/results', id: 'results', label: 'RESULTS & ANALYTICS' }
 ];
 
-const Sidebar = () => {
+const candidateNavItems = [
+  { path: '/candidate/dashboard', id: 'candidate-dashboard', label: 'CANDIDATE DASHBOARD' },
+  { path: '/candidate/cases', id: 'candidate-cases', label: 'CASE STUDIES' },
+  { path: '/candidate/results', id: 'candidate-results', label: 'MY RESULTS' }
+];
+
+const Sidebar = ({ navItems }) => {
+  const { userEmail, logoutUser } = useData();
   return (
     <aside className="sidebar">
-      <div className="sidebar-logo">STRATEGIC ADVISOR</div>
-      <nav>
+      <div className="sidebar-logo">AI-POWERED CONSULTANT</div>
+      <nav className="sidebar-nav">
         {navItems.map((item) => (
           <NavLink
             key={item.id}
@@ -31,13 +38,28 @@ const Sidebar = () => {
           </NavLink>
         ))}
       </nav>
+      <div className="sidebar-user-section">
+        <div className="sidebar-user-info">
+          <div className="sidebar-avatar">{userEmail ? userEmail[0].toUpperCase() : 'U'}</div>
+          <div className="sidebar-user-details">
+            <div className="sidebar-label">CONNECTED</div>
+            <div className="sidebar-email">{userEmail}</div>
+          </div>
+        </div>
+        <button onClick={logoutUser} className="sidebar-logout">LOGOUT</button>
+      </div>
     </aside>
   );
 };
 
 const TopBar = ({ theme, toggleTheme }) => {
-  const { userEmail, logoutUser } = useData();
+  const { userRole } = useData();
   const location = useLocation();
+  const navItems = userRole === 'admin'
+    ? adminNavItems
+    : userRole === 'candidate'
+      ? candidateNavItems
+      : [{ path: '/', id: 'assessment', label: 'CONSULTANT EVALUATION' }];
   const currentPage = navItems.find(item => item.path === location.pathname) || navItems[0];
   const pageTitle = currentPage.label;
 
@@ -45,25 +67,17 @@ const TopBar = ({ theme, toggleTheme }) => {
     <header className="topbar">
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
         <h2 className="header-title">{pageTitle}</h2>
-        <input type="text" className="search-input" placeholder="SEARCH INTELLIGENCE..." />
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-        <div style={{ borderRight: '1px solid var(--border-default)', paddingRight: '16px', display: 'flex', gap: '8px', alignItems: 'center' }}>
-            <div style={{ textAlign: 'right' }}>
-                <div style={{ fontSize: '0.6rem', opacity: 0.5, fontWeight: '800' }}>CONNECTED</div>
-                <div style={{ fontSize: '0.75rem', fontWeight: '800', color: 'var(--accent-primary)' }}>{userEmail}</div>
-            </div>
-            <button onClick={logoutUser} style={{ background: 'none', border: '1px solid var(--border-default)', borderRadius: '4px', cursor: 'pointer', fontSize: '0.6rem', padding: '4px 8px' }}>LOGOUT</button>
-        </div>
         <button className="theme-toggle" onClick={toggleTheme}>{theme === 'light' ? 'DARK' : 'LIGHT'}</button>
-        <div className="avatar">{userEmail ? userEmail[0].toUpperCase() : 'U'}</div>
       </div>
     </header>
   );
 };
 
 function AppContent() {
-  const { userEmail } = useData();
+  const { userEmail, userRole } = useData();
+  const location = useLocation();
   const [theme, setTheme] = useState('light');
 
   const toggleTheme = () => {
@@ -76,20 +90,45 @@ function AppContent() {
     document.documentElement.setAttribute('data-theme', 'light');
   }, []);
 
-  if (!userEmail) return <LoginOverlay theme={theme} toggleTheme={toggleTheme} />;
+  // Public assessment routes (via invite links) don't require login
+  const currentPath = location.pathname;
+  const isPublicAssessment = currentPath.startsWith('/assess/invite/');
+  const isCandidateAssessment = currentPath.startsWith('/candidate/assessment/');
+  const isAssessmentRoute = isPublicAssessment || isCandidateAssessment;
+
+  if (!userEmail && !isPublicAssessment) {
+      return <LoginOverlay theme={theme} toggleTheme={toggleTheme} />;
+  }
+
+  // Determine if sidebar should be shown (Admin only)
+  const showSidebar = (userRole === 'admin' || userRole === 'candidate') && !isAssessmentRoute;
+  const navItems = userRole === 'admin' ? adminNavItems : userRole === 'candidate' ? candidateNavItems : [];
 
   return (
     <div className="app-container">
-      <Sidebar />
-      <main className="main-content">
-        <TopBar theme={theme} toggleTheme={toggleTheme} />
-        <div className="content-area">
+      {showSidebar && <Sidebar navItems={navItems} />}
+      <main className={`main-content ${showSidebar ? '' : 'main-content-full'}`}>
+        {!isAssessmentRoute && <TopBar theme={theme} toggleTheme={toggleTheme} />}
+        <div className={`content-area ${isAssessmentRoute ? 'assessment-route-content' : ''}`}>
           <Routes>
-            <Route path="/" element={<OverviewDashboard />} />
-            <Route path="/decisions" element={<DecisionsInsights />} />
-            <Route path="/simulator" element={<ScenarioSimulator />} />
-            <Route path="/data" element={<DataIntegrations />} />
-            <Route path="/intelligence" element={<SystemIntelligence />} />
+            {userRole === 'admin' ? (
+                <>
+                    <Route path="/" element={<Navigate to="/admin/dashboard" replace />} />
+                    <Route path="/admin/dashboard" element={<AdminDashboard />} />
+                    <Route path="/admin/cases" element={<AdminEvaluation />} />
+                    <Route path="/admin/results" element={<AdminResults />} />
+                    <Route path="/assess/invite/:inviteId" element={<CandidateAssessment />} />
+                </>
+            ) : (
+                <>
+                <Route path="/" element={<Navigate to="/candidate/dashboard" replace />} />
+                <Route path="/candidate/dashboard" element={<CandidateDashboard />} />
+                <Route path="/candidate/cases" element={<CandidateCaseStudies />} />
+                <Route path="/candidate/results" element={<CandidateResults />} />
+                <Route path="/candidate/assessment/:caseStudyId" element={<CandidateAssessment isDirectCase={true} />} />
+                    <Route path="/assess/invite/:inviteId" element={<CandidateAssessment />} />
+                </>
+            )}
           </Routes>
         </div>
       </main>

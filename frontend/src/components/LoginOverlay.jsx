@@ -1,14 +1,27 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useData } from '../context/DataContext';
 
 const LoginOverlay = ({ theme, toggleTheme }) => {
     const { loginUser } = useData();
-    const [email, setEmail] = useState('');
+    const navigate = useNavigate();
+    const [username, setUsername] = useState('');
+    const [password, setPassword] = useState('');
+    const [error, setError] = useState('');
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        if (email.trim() && email.includes('@')) {
-            loginUser(email);
+        const result = loginUser(username, password);
+        if (result.success) {
+            setError('');
+            // Navigate to respective dashboard based on role
+            if (result.role === 'admin') {
+                navigate('/admin/dashboard');
+            } else if (result.role === 'candidate') {
+                navigate('/candidate/dashboard');
+            }
+        } else {
+            setError('ACCESS DENIED: INVALID CREDENTIALS');
         }
     };
 
@@ -29,26 +42,42 @@ const LoginOverlay = ({ theme, toggleTheme }) => {
                 <div style={{ textAlign: 'center', marginBottom: '32px' }}>
                     <div style={{ fontSize: '0.7rem', fontWeight: '900', color: 'var(--accent-primary)', marginBottom: '8px', letterSpacing: '0.2em' }}>[ENTERPRISE_AUTHENTICATION]</div>
                     <h1 style={{ fontSize: '1.75rem', fontWeight: '900', letterSpacing: '0.05em', color: 'var(--text-primary)' }}>AI STRATEGIC ADVISOR</h1>
-                    <p style={{ fontSize: '0.75rem', opacity: 0.8, marginTop: '8px', color: 'var(--text-secondary)' }}>Login with your secure email to sync historical intelligence snapshots.</p>
+                    <p style={{ fontSize: '0.75rem', opacity: 0.8, marginTop: '8px', color: 'var(--text-secondary)' }}>Login with your secure credentials to sync historical intelligence snapshots.</p>
                 </div>
 
                 <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                    {error && <div style={{ color: '#ff4444', fontSize: '0.65rem', fontWeight: '800', textAlign: 'center', padding: '8px', background: 'rgba(255,68,68,0.1)', borderRadius: '4px' }}>{error}</div>}
+                    
                     <div className="form-group">
-                        <label style={{ fontSize: '0.65rem', fontWeight: '800', opacity: 0.7, marginBottom: '6px', display: 'block', color: 'var(--text-primary)' }}>USER IDENTIFIER (EMAIL)</label>
+                        <label style={{ fontSize: '0.65rem', fontWeight: '800', opacity: 0.7, marginBottom: '6px', display: 'block', color: 'var(--text-primary)' }}>USER IDENTIFIER</label>
                         <input 
-                            type="email" 
+                            type="text" 
                             className="login-input" 
-                            placeholder="user@enterprise.ai"
-                            value={email}
-                            onChange={(e) => setEmail(e.target.value)}
+                            placeholder="admin / user"
+                            value={username}
+                            onChange={(e) => setUsername(e.target.value)}
                             required
                             style={{ width: '100%', padding: '14px', borderRadius: '8px', border: '1px solid var(--border-default)', background: 'rgba(255,255,255,0.03)', color: 'var(--text-primary)', fontSize: '0.9rem' }}
                         />
                     </div>
+
+                    <div className="form-group">
+                        <label style={{ fontSize: '0.65rem', fontWeight: '800', opacity: 0.7, marginBottom: '6px', display: 'block', color: 'var(--text-primary)' }}>SECURITY TOKEN (PASSWORD)</label>
+                        <input 
+                            type="password" 
+                            className="login-input" 
+                            placeholder="••••••••"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            required
+                            style={{ width: '100%', padding: '14px', borderRadius: '8px', border: '1px solid var(--border-default)', background: 'rgba(255,255,255,0.03)', color: 'var(--text-primary)', fontSize: '0.9rem' }}
+                        />
+                    </div>
+
                     <button 
                         type="submit" 
                         className="login-btn"
-                        style={{ width: '100%', padding: '14px', borderRadius: '8px', border: 'none', background: 'var(--accent-primary)', color: 'white', fontWeight: '800', fontSize: '0.8rem', cursor: 'pointer', transition: 'transform 0.2s' }}
+                        style={{ width: '100%', padding: '14px', borderRadius: '8px', border: 'none', background: 'var(--accent-primary)', color: 'white', fontWeight: '800', fontSize: '0.8rem', cursor: 'pointer', transition: 'transform 0.2s', marginTop: '8px' }}
                     >
                         SYNC INTELLIGENCE SESSION
                     </button>
