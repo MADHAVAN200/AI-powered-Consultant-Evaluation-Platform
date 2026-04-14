@@ -1,144 +1,170 @@
-# AI-powered Consultant for Enterprises
+# AI-Powered Consultant Evaluation Platform
 
-A self-learning, domain-agnostic AI decision intelligence platform that continuously transforms internal and global data into actionable business strategy.
+An elite, AI-driven assessment engine designed to evaluate management consultants through high-fidelity, live case study interviews. The platform automates the end-to-end recruitment funnel—from case creation via PDF parsing to real-time conversational evaluation using advanced Large Language Models.
 
-> "An AI that monitors your business, understands the world, suggests decisions, and learns from your actions—every single day."
-
----
-
-## Technical Problem Statement
-Modern enterprises face significant challenges in decision-making:
-- **Fragmented Data**: Information is often siloed across Finance (ERP), HR (HRM), and Sales (CRM), lacking a unified intelligence layer.
-- **Reactive Strategy**: Decisions are traditionally made after impact occurs, as there is no system connecting global events to internal company impact.
-- **Inadequate Scenario Testing**: Absence of tools to simulate critical scenarios (e.g., "What if costs increase?" or "What if demand drops?").
-- **Static Intelligence**: Traditional BI tools show what *happened* but fail to predict what *will* happen or recommend what *should* be done.
-- **Broken Learning Loops**: Past decisions are not systematically utilized to improve future predictive accuracy.
-
-## Solution Architecture
-The platform is a domain-agnostic AI consultant designed to ingest internal and global data, analyze impacts, generate decision strategies, and simulate outcomes.
-
-### Core Capabilities
-| Capability | Description |
-| :--- | :--- |
-| **Real-time Intelligence** | Continuous updates to insights based on real-time data feeds. |
-| **Multi-Decision Output** | Generation of multiple strategic options with associated risk profiles. |
-| **Scenario Simulation** | Prediction of outcomes before execution using probabilistic modeling. |
-| **Reinforcement Learning**| Continuous model improvement based on user actions and historical outcomes. |
-| **Generic Architecture** | Industry-independent design via a Universal Entity Model. |
+> "Scaling elite talent identification through sovereign AI intelligence."
 
 ---
 
-## Detailed System Architecture
+## 🏗 System Architecture & Flow
 
-### Data Processing Pipeline
-The following diagram illustrates the flow from raw data ingestion to the unified dashboard visualization.
+### 1. High-Level Architecture (C4 Model)
+The platform is built on a decoupled architecture ensuring separation of concerns between candidate experience, administrative management, and AI intelligence.
 
 ```mermaid
-graph TD
-    subgraph Data Sources
-        S1[External: Global Events]
-        S2[Internal: ERP/CRM/HRM]
+graph TB
+    subgraph Client Layer
+        Admin[Admin Dashboard - React]
+        Cand[Candidate Assessment Portal - React]
     end
-    
-    subgraph Ingestion Layer
-        I1[Data Ingestion API]
-        I2[Data Standardization]
+
+    subgraph Logic Layer
+        Express[Express.js Server]
+        Auth[Auth & Permission Logic]
+        PDF[PDF Parsing Engine]
+        AI_Eng[AI Evaluation Engine]
     end
-    
-    subgraph Intelligence Layer
-        K1[Knowledge Graph]
-        E1[AI Multi-Agent System]
-        S3[Decision & Simulation Engine]
+
+    subgraph Intelligence & Data Layer
+        Groq[Groq Llama 3 API]
+        Supabase[Supabase PostgreSQL]
+        Rotation[High-Availability Key Rotation]
     end
-    
-    subgraph Feedback Loop
-        RL[Reinforcement Learning]
-    end
-    
-    S1 --> I1
-    S2 --> I1
-    I1 --> I2
-    I2 --> K1
-    K1 --> E1
-    E1 --> S3
-    S3 --> RL
-    RL --> E1
-    S3 --> DASH[Dashboard UI]
+
+    Admin --> Express
+    Cand --> Express
+    Express --> Auth
+    Express --> PDF
+    Express --> AI_Eng
+    AI_Eng --> Rotation
+    Rotation --> Groq
+    Express --> Supabase
 ```
 
-### AI Multi-Agent Interaction
-Our system utilizes a specialized multi-agent architecture where agents collaborate to derive strategy from raw data.
+---
+
+### 2. AI Interview & Evaluation Logic
+The core of the platform is a sophisticated evaluation loop that handles candidate input, assesses logic depth, and manages session state (including disqualifications).
+
+```mermaid
+flowchart TD
+    Start([Candidate Answer Received]) --> Valid{Valid Input?}
+    Valid -- No --> Retry[Prompt for Input]
+    Valid -- Yes --> Engine{AI Available?}
+    
+    Engine -- Yes --> LLM[Llama 3 70B Evaluation]
+    Engine -- No --> Rules[Rule-Based Fallback Engine]
+    
+    LLM --> Metrics[Extract Rubric Scores]
+    Rules --> Metrics
+    
+    Metrics --> Depth{Logical Depth > 2?}
+    Depth -- No --> Strike[Increment Strike Count]
+    Depth -- Yes --> Next[Update Session State]
+    
+    Strike --> Max{Strikes >= 3?}
+    Max -- Yes --> Disq([DISQUALIFIED])
+    Max -- No --> Next
+    
+    Next --> Phase{Next Phase?}
+    Phase -- Partial --> Question[Generate Dynamic Question]
+    Phase -- Complete --> Results([GENERATE FINAL SCORE])
+    
+    Question --> FE[Display to Candidate]
+```
+
+---
+
+### 3. PDF Data Extraction Pipeline
+Admins can upload case PDFs which are processed through a multi-stage extraction pipeline to build structured interactive assessments.
+
+```mermaid
+flowchart LR
+    PDF[Raw PDF Upload] --> Clean[Text Cleaning & Normalization]
+    Clean --> Regex[Pattern Matching Extraction]
+    
+    subgraph Extraction Stages
+        Regex --> Title[Title & Industry Inference]
+        Regex --> Context[Context & Problem Extraction]
+        Regex --> Series[Numeric Time-Series Parsing]
+        Regex --> Logic[Scoring Logic & Rubrics]
+    end
+    
+    Title --> JSON[Final Case JSON Draft]
+    Context --> JSON
+    Series --> JSON
+    Logic --> JSON
+    
+    JSON --> DB[(Database Storage)]
+```
+
+---
+
+### 4. High-Availability (HA) AI Failover
+To prevent interview interruption, the platform implements a round-robin rotation for AI API keys.
 
 ```mermaid
 sequenceDiagram
-    participant TA as Trend Agent
-    participant IA as Impact Agent
-    participant RA as Risk Agent
-    participant SA as Strategy Agent
-    participant SIM as Simulation Agent
-
-    TA->>IA: Detects Global Pattern (e.g., Oil Price Spike)
-    IA->>RA: Maps impact to Logistics Costs
-    RA->>SA: Identifies potential threats to Profit Margin
-    SA->>SIM: Generates Strategy: "Increase Price by 2%"
-    SIM->>SA: Predicts Outcome: +5% Profit, 0.72 Confidence
-    SA->>User: Presents actionable decision
+    participant App as Backend Engine
+    participant K1 as Groq Key #1
+    participant K2 as Groq Key #2 (Failover)
+    
+    App->>K1: Send Evaluation Request
+    alt Key #1 Success
+        K1-->>App: Return JSON Scoring
+    else Key #1 Limit/Error
+        K1-->>App: 429 / 500 Error
+        Note over App, K2: [HA-FAILOVER] Switch to Key #2
+        App->>K2: Retry Evaluation Request
+        K2-->>App: Return JSON Scoring
+    end
 ```
 
 ---
 
-## Data Modeling
+## 🚀 Core Capabilities
 
-### Universal Entity Model
-To remain domain-agnostic, the platform uses a generic schema to represent various business metrics and resources.
+### AI Interview Engine
+*   **Live Conversational Assessment**: Conducts real-time, multi-step interviews using **Llama 3.3 (70B)** via Groq.
+*   **Adaptive Follow-ups**: The AI dynamically generates probing questions based on candidate responses.
+*   **Phase-Based Logic**: Interviews proceed through logical consulting phases: `Diagnostic`, `Brainstorming`, `Calculations`, and `Recommendation`.
 
-```json
-{
-  "entities": [
-    {"name": "Revenue", "type": "metric"},
-    {"name": "Cost", "type": "metric"},
-    {"name": "Employees", "type": "resource"}
-  ],
-  "relationships": [
-    {"from": "Cost", "to": "Profit", "type": "inverse"},
-    {"from": "Employees", "to": "Revenue", "type": "influence"}
-  ]
-}
-```
+### Intelligent Case Management
+*   **PDF-to-Case Parser**: Automatically transforms standard consulting case PDFs into structured assessments.
+*   **Domain Agnostic**: Supports diverse industries including **FinTech**, **SaaS**, **D2C**, and **Banking**.
 
-### Event-Based Modeling
-Global signals are converted into impact vectors that influence internal metrics.
-
-```json
-{
-  "event": "Oil Price Increase",
-  "impact_vector": {
-    "Logistics Cost": +0.3
-  }
-}
-```
+### Comprehensive Evaluation & Scoring
+*   **5-Metric Rubric**: Candidates are scored on Problem Understanding, Data Usage, Root Cause Identification, Solution Quality, and Consistency.
+*   **Strike System**: Automated disqualification for generic or low-depth responses (3-strike limit).
 
 ---
 
-## Tech Stack & Implementation
-- **Frontend**: React with Vite for a high-performance, reactive UI.
-- **Backend**: Node.js and Express for the core API and data orchestration.
-- **Workflow**: Integrated development environment managed via `concurrently`.
-
-### Quick Start
-1. **Dependency Installation**:
-   ```bash
-   npm run install-all
-   ```
-2. **Unified Development Launch**:
-   ```bash
-   npm start
-   ```
+## 💻 Tech Stack
+*   **Frontend**: React.js, Vite, Vanilla CSS.
+*   **Backend**: Node.js, Express.
+*   **AI/LLM**: Groq SDK (Llama 3.3 70B Versatile).
+*   **Database**: Supabase (PostgreSQL).
+*   **Storage**: Multer (In-memory buffer).
 
 ---
 
-## Phased Implementation Roadmap
-- **Phase 1 (MVP)**: Centralized data upload, basic KPI generation, and static rule-based recommendations.
-- **Phase 2**: Integration of real-time global event feeds and the multi-agent orchestration layer.
-- **Phase 3**: Full implementation of the Scenario Simulation Engine with probabilistic modeling.
-- **Phase 4**: Reinforcement Learning systems to enable autonomous decision refinement.
+## ⚙️ Installation & Setup
+
+### 1. Environment Configuration
+Create a `.env` file in the `backend/` directory:
+```env
+PORT=5000
+SUPABASE_URL=your_supabase_url
+SUPABASE_ANON_KEY=your_supabase_anon_key
+GROQ_API_KEY_1=your_primary_groq_key
+GROQ_API_KEY_2=your_backup_groq_key
+```
+
+### 2. Database Setup
+Execute the SQL found in [`backend/schema_v2_evaluation.sql`](file:///backend/schema_v2_evaluation.sql) inside your Supabase SQL Editor.
+
+### 3. Unified Development Launch
+```bash
+npm run install-all
+npm start
+```
