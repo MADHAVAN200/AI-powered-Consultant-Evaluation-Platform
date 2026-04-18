@@ -132,6 +132,7 @@ function AppContent() {
   const isPublicAssessment = currentPath.startsWith('/assess/invite/');
   const isCandidateAssessment = currentPath.startsWith('/candidate/assessment/');
   const isAssessmentRoute = isPublicAssessment || isCandidateAssessment;
+  const isAdminCasesRoute = currentPath === '/admin/cases';
 
   if (!userEmail && !isPublicAssessment) {
       return <LoginOverlay theme={theme} toggleTheme={toggleTheme} />;
@@ -145,8 +146,8 @@ function AppContent() {
     <div className="app-container">
       {showSidebar && <Sidebar navItems={navItems} />}
       <main className={`main-content ${showSidebar ? '' : 'main-content-full'}`}>
-        {!isAssessmentRoute && <TopBar theme={theme} toggleTheme={toggleTheme} />}
-        <div className={`content-area ${isAssessmentRoute ? 'assessment-route-content' : ''}`}>
+        {!isAssessmentRoute && !isAdminCasesRoute && <TopBar theme={theme} toggleTheme={toggleTheme} />}
+        <div className={`content-area ${isAssessmentRoute ? 'assessment-route-content' : ''} ${isAdminCasesRoute ? 'admin-cases-route-content' : ''}`}>
           <Routes>
             <Route path="/" element={<Navigate to={homePath} replace />} />
 

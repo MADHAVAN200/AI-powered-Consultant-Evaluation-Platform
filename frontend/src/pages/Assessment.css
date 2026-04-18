@@ -916,10 +916,10 @@ body.assessment-lock { overflow: hidden; height: 100vh; }
     font-size: 0.68rem;
     font-weight: 800;
     padding: 0 12px;
-    border-radius: 8px;
+    border-radius: 4px;
     cursor: pointer;
     transition: all 0.2s;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
     height: 34px;
     min-width: 64px;
     display: inline-flex;
@@ -1217,10 +1217,10 @@ body.assessment-lock { overflow: hidden; height: 100vh; }
     color: white;
     border: none;
     padding: 10px 24px;
-    border-radius: 8px;
+    border-radius: 4px;
     font-weight: 800;
     font-size: 0.75rem;
-    letter-spacing: 0.05em;
+    letter-spacing: 0;
     cursor: pointer;
     transition: opacity 0.2s;
 }
@@ -1305,7 +1305,7 @@ body.assessment-lock { overflow: hidden; height: 100vh; }
     color: var(--text-secondary);
     font-size: 0.72rem;
     font-weight: 700;
-    border-radius: 8px;
+    border-radius: 4px;
     padding: 9px 10px;
     text-align: left;
     cursor: pointer;
