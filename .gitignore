@@ -25,6 +25,12 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Python / RAG generated artifacts
+backend/python_rag_service/__pycache__/
+backend/python_rag_service/.chroma/
+backend/python_rag_service/logs/
+*.pyc
+
 # OS Files
 .DS_Store
 Thumbs.db

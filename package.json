@@ -4,9 +4,11 @@
   "description": "Project with React frontend and Express backend",
   "main": "index.js",
   "scripts": {
-    "start": "concurrently \"npm run backend\" \"npm run frontend\"",
+    "start": "concurrently -k -n FRONTEND,BACKEND,RAG \"npm run frontend\" \"npm run backend\" \"npm run rag\"",
     "frontend": "npm run dev --prefix frontend",
     "backend": "npm run dev --prefix backend",
+    "rag": "npm run rag:start --prefix backend",
+    "start:dev": "concurrently -k -n FRONTEND,BACKEND,RAG \"npm run frontend\" \"npm run dev --prefix backend\" \"npm run rag:dev --prefix backend\"",
     "install-all": "npm install && npm install --prefix frontend && npm install --prefix backend"
   },
   "devDependencies": {

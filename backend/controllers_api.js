@@ -21,6 +21,7 @@ const createApiController = (service) => {
 
         listCaseStudies: (req, res) => send(res, () => service.listCaseStudies()),
         getCaseStudyBrief: (req, res) => send(res, () => service.getCaseStudyBrief(req.params.id)),
+        getCaseStudyBriefSection: (req, res) => send(res, () => service.getCaseStudyBriefSection(req.params.id, req.params.sectionKey)),
         importCaseStudyPdf: (req, res) => send(res, () => service.importCaseStudyPdf(req.file)),
         createCaseStudy: (req, res) => send(res, () => service.createCaseStudy(req.body || {})),
         updateCaseStudy: (req, res) => send(res, () => service.updateCaseStudy(req.params.id, req.body || {})),

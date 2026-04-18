@@ -5,7 +5,10 @@
   "main": "server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "nodemon server.js"
+    "start:plain": "node server.js",
+    "dev": "nodemon --watch server.js --watch routes_*.js --watch controllers_api.js --watch services_api.js --watch .env --ext js,mjs,cjs,json,env --ignore python_rag_service/** --ignore **/__pycache__/** server.js",
+    "rag:start": "python python_rag_service/run_service.py",
+    "rag:dev": "python -m uvicorn python_rag_service.app:app --host 0.0.0.0 --port 8001 --reload --reload-dir python_rag_service"
   },
   "keywords": [],
   "author": "",

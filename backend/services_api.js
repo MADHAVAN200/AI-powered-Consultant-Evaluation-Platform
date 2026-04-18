@@ -25,6 +25,7 @@ const DEMO_CASE_STUDY = {
 };
 
 const inMemoryDemoSessions = new Map();
+const caseCorpusCache = new Map();
 
 class ApiError extends Error {
     constructor(status, message) {
@@ -412,7 +413,112 @@ const getRuleBasedEvaluation = (userMessage, currentStep = 'diagnostic') => {
     };
 };
 
-const buildEvaluationPrompt = (session, currentStep) => {
+const normalizeWhitespace = (text = '') => String(text || '').replace(/\s+/g, ' ').trim();
+
+const tokenize = (text = '') => normalizeWhitespace(text)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s.%]/g, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length > 2);
+
+const splitIntoChunks = (text = '', maxLen = 900, overlap = 120) => {
+    const clean = normalizeWhitespace(text);
+    if (!clean) return [];
+
+    const chunks = [];
+    let start = 0;
+    while (start < clean.length) {
+        const end = Math.min(clean.length, start + maxLen);
+        const chunk = clean.slice(start, end).trim();
+        if (chunk.length > 40) chunks.push(chunk);
+        if (end >= clean.length) break;
+        start = Math.max(end - overlap, start + 1);
+    }
+    return chunks;
+};
+
+const buildCaseCorpus = (caseStudy = {}) => {
+    const id = String(caseStudy.id || caseStudy.title || 'unknown-case');
+    if (caseCorpusCache.has(id)) return caseCorpusCache.get(id);
+
+    const sources = [];
+    const pushSource = (tag, value) => {
+        const text = normalizeWhitespace(value);
+        if (text) sources.push({ tag, text });
+    };
+
+    pushSource('context', caseStudy.context || '');
+    pushSource('initial_prompt', caseStudy.initial_prompt || '');
+    pushSource('raw_content', caseStudy.raw_content || '');
+
+    if (caseStudy.financial_data && typeof caseStudy.financial_data === 'object') {
+        const financialLines = Object.entries(caseStudy.financial_data)
+            .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : String(v)}`)
+            .join('\n');
+        pushSource('financial_data', financialLines);
+    }
+
+    if (caseStudy.parsed_sections && typeof caseStudy.parsed_sections === 'object') {
+        for (const [section, body] of Object.entries(caseStudy.parsed_sections)) {
+            if (section === '_numericSeries') continue;
+            pushSource(`section:${section}`, typeof body === 'string' ? body : JSON.stringify(body));
+        }
+    }
+
+    const chunks = [];
+    for (const source of sources) {
+        const split = splitIntoChunks(source.text, 900, 140);
+        split.forEach((chunk, idx) => {
+            chunks.push({
+                id: `${source.tag}-${idx + 1}`,
+                source: source.tag,
+                text: chunk,
+                tokens: tokenize(chunk)
+            });
+        });
+    }
+
+    caseCorpusCache.set(id, chunks);
+    return chunks;
+};
+
+const scoreChunkForQuery = (queryTokens = [], chunk = {}, recentTokens = []) => {
+    if (!chunk || !Array.isArray(chunk.tokens)) return 0;
+    const tokenSet = new Set(chunk.tokens);
+
+    const queryMatches = queryTokens.filter((t) => tokenSet.has(t)).length;
+    const recentMatches = recentTokens.filter((t) => tokenSet.has(t)).length;
+
+    // Give extra signal to numeric consistency for case math questions.
+    const hasNumbers = /\d/.test(chunk.text || '') ? 1 : 0;
+
+    return (queryMatches * 3) + recentMatches + hasNumbers;
+};
+
+const retrieveCaseEvidence = ({ caseStudy, userMessage, history = [], topK = 8 }) => {
+    const chunks = buildCaseCorpus(caseStudy);
+    if (!chunks.length) return [];
+
+    const queryTokens = tokenize(userMessage);
+    const recentAssistantAndUser = history.slice(-6).map((m) => m.content || '').join(' ');
+    const recentTokens = tokenize(recentAssistantAndUser);
+
+    const ranked = chunks
+        .map((chunk) => ({
+            chunk,
+            score: scoreChunkForQuery(queryTokens, chunk, recentTokens)
+        }))
+        .filter((r) => r.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, topK)
+        .map((r) => r.chunk);
+
+    // Safe fallback if lexical scoring misses but case exists.
+    if (ranked.length > 0) return ranked;
+    return chunks.slice(0, Math.min(topK, chunks.length));
+};
+
+const buildEvaluationPrompt = (session, currentStep, evidenceChunks = []) => {
     const cs = session.case_studies;
     const fullCaseDocument = cs.raw_content || cs.context || '';
     const financialSummary = cs.financial_data && Object.keys(cs.financial_data).length > 0
@@ -421,11 +527,25 @@ const buildEvaluationPrompt = (session, currentStep) => {
             .join('\n')
         : 'See case document for financial data.';
 
+    const evidencePack = evidenceChunks.length > 0
+        ? evidenceChunks.map((c, i) => `[E${i + 1}] (${c.source}) ${c.text}`).join('\n\n')
+        : '[E1] No retrieved chunks. Use only explicit case text below and ask for clarification when data is missing.';
+
     return `You are a Senior Partner at a top-tier strategy consulting firm conducting a live case study interview.
 
 CASE TITLE: ${cs.title}
 INDUSTRY: ${cs.industry || 'General Business Strategy'}
 CURRENT INTERVIEW PHASE: ${currentStep}
+
+GROUNDING MODE (STRICT):
+- You MUST ground all reasoning and follow-up questions in the EVIDENCE PACK.
+- If a fact is not present in evidence, do not invent it.
+- If evidence is insufficient, ask a clarification question instead of making up details.
+- Do not use external knowledge, prior assumptions, or generic industry facts unless present in evidence.
+
+--- EVIDENCE PACK (retrieved for this candidate turn) ---
+${evidencePack}
+--- END EVIDENCE PACK ---
 
 --- FULL CASE DOCUMENT (read carefully — this is exactly what the candidate sees) ---
 ${fullCaseDocument}
@@ -478,12 +598,87 @@ Return valid JSON only using this shape:
 };
 
 const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
+    const ragServiceUrl = String(process.env.PY_RAG_SERVICE_URL || '').trim();
+    const ragDebugLogs = /^(1|true|yes|on)$/i.test(String(process.env.RAG_DEBUG_LOGS || '').trim());
+
+    const callPythonRagEvaluate = async ({ session, history, userMessage, currentStep }) => {
+        if (!ragServiceUrl) return null;
+        try {
+            const res = await fetch(`${ragServiceUrl.replace(/\/$/, '')}/rag/evaluate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    caseStudy: session.case_studies || {},
+                    history: Array.isArray(history) ? history.slice(-12) : [],
+                    userMessage,
+                    currentStep,
+                    sessionId: session.id || null
+                })
+            });
+            if (!res.ok) return null;
+            const payload = await res.json();
+            if (!payload || !payload.success || !payload.evaluation) return null;
+
+            const ev = payload.evaluation;
+            if (ragDebugLogs) {
+                const metrics = ev.retrievalMetrics || {};
+                console.info('[RAG DEBUG] evaluate', {
+                    sessionId: session.id || null,
+                    retrievalCount: metrics.retrievalCount,
+                    retrievedChunkIds: metrics.retrievedChunkIds || [],
+                    citedChunkIds: metrics.citedChunkIds || [],
+                    groundingPassed: metrics.groundingPassed,
+                    regenerated: metrics.regenerated
+                });
+            }
+            return {
+                response: ev.response || 'Please continue with a structured answer and measurable assumptions.',
+                analysis: ev.analysis || 'RAG evaluation completed.',
+                logicalDepth: clamp(Number(ev.logicalDepth || 2), 1, 5),
+                rubricScores: normalizeRubric(ev.rubricScores || {}),
+                weakResponse: Boolean(ev.weakResponse),
+                isDisqualified: Boolean(ev.isDisqualified),
+                nextStep: ev.nextStep || currentStep,
+                citations: Array.isArray(ev.citations) ? ev.citations : [],
+                retrievalMetrics: ev.retrievalMetrics || null
+            };
+        } catch {
+            return null;
+        }
+    };
+
+    const triggerPythonRagIndex = async (caseStudy) => {
+        if (!ragServiceUrl || !caseStudy) return;
+        try {
+            const res = await fetch(`${ragServiceUrl.replace(/\/$/, '')}/rag/index-case`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ caseStudy })
+            });
+            if (ragDebugLogs && res.ok) {
+                const payload = await res.json();
+                console.info('[RAG DEBUG] index-case', payload?.result || payload);
+            }
+        } catch {
+            // Non-blocking best-effort indexing.
+        }
+    };
+
     const runAiEvaluation = async (session, history, userMessage, currentStep) => {
+        const ragFirst = await callPythonRagEvaluate({ session, history, userMessage, currentStep });
+        if (ragFirst) return ragFirst;
+
         if (groqClients.length === 0) {
             return getRuleBasedEvaluation(userMessage, currentStep);
         }
 
-        const systemPrompt = buildEvaluationPrompt(session, currentStep);
+        const evidenceChunks = retrieveCaseEvidence({
+            caseStudy: session.case_studies || {},
+            userMessage,
+            history,
+            topK: 8
+        });
+        const systemPrompt = buildEvaluationPrompt(session, currentStep, evidenceChunks);
 
         for (let attempt = 0; attempt < groqClients.length; attempt += 1) {
             const activeClient = groqClients[(attempt + (groqClients.length - 1)) % groqClients.length] || groqClients[0];
@@ -675,8 +870,6 @@ const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
                     .upsert([{
                         session_id: sessionId,
                         total_score: totalRubricScore,
-                        rubric: rubricScores,
-                        logical_depth: clamp(Number(evaluated.logicalDepth || 2), 1, 5),
                         is_passing: isPassing
                     }], { onConflict: 'session_id' });
                 if (scoreError) throw new ApiError(500, scoreError.message);
@@ -702,7 +895,9 @@ const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
                 },
                 scoring,
                 conversationalFeedback: buildConversationalFeedback(rubricScores, totalRubricScore, attemptsLeft, evaluated.nextStep || session.current_step),
-                fallbackMode: isFallback
+                fallbackMode: isFallback,
+                citations: Array.isArray(evaluated.citations) ? evaluated.citations : [],
+                retrievalMetrics: evaluated.retrievalMetrics || null
             };
         },
 
@@ -768,6 +963,97 @@ const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
                     estimatedMinutes: 30
                 },
                 aiGenerated: false
+            };
+        },
+
+        async getCaseStudyBriefSection(id, sectionKey) {
+            const section = String(sectionKey || '').toLowerCase().trim();
+            const allowedSections = new Set(['snapshot', 'problem', 'objectives', 'events', 'insights']);
+            if (!allowedSections.has(section)) {
+                throw new ApiError(400, 'Invalid section key');
+            }
+
+            const briefRes = await this.getCaseStudyBrief(id);
+            const brief = briefRes?.brief || {};
+
+            if (section === 'snapshot') {
+                const summary = [
+                    `Primary ask: ${brief.primaryQuestion || 'Diagnose the core business problem.'}`,
+                    `Passing benchmark: ${Number.isFinite(Number(brief.passingMarks)) ? Number(brief.passingMarks) : 60}/100 with structured, data-backed reasoning.`,
+                    `This case should be solved using business context, event timeline, and metric trend interpretation together.`
+                ];
+
+                return {
+                    success: true,
+                    sectionKey: 'snapshot',
+                    section: {
+                        title: 'AI Snapshot',
+                        headline: `${brief.primaryQuestion || 'Diagnose the business problem and propose an action plan.'}`,
+                        contextLines: Array.isArray(brief.companyOverview) ? brief.companyOverview : [],
+                        diagnosticSummary: summary,
+                        pressureSignals: Array.isArray(brief.keyInsights) ? brief.keyInsights.slice(0, 5) : [],
+                        positiveSignals: Array.isArray(brief.keyMetrics) ? brief.keyMetrics.slice(0, 4).map((m) => `${m.label}: ${m.value}`) : [],
+                        businessEvents: Array.isArray(brief.businessEvents) ? brief.businessEvents : [],
+                        coreQuestions: String(brief.problemStatement || brief.primaryQuestion || '')
+                            .split('\n')
+                            .map((q) => q.replace(/^\d+[).:\s]+/, '').trim())
+                            .filter(Boolean)
+                            .slice(0, 5),
+                        expectedOutputs: Array.isArray(brief.expectedOutput) ? brief.expectedOutput : []
+                    }
+                };
+            }
+
+            if (section === 'problem') {
+                return {
+                    success: true,
+                    sectionKey: 'problem',
+                    section: {
+                        title: 'Problem Statement',
+                        introLines: String(brief.problemStatement || brief.primaryQuestion || '')
+                            .split('\n')
+                            .map((l) => l.trim())
+                            .filter((l) => l.length > 0 && !/^\d+[).:]/.test(l))
+                            .slice(0, 3),
+                        questions: String(brief.problemStatement || brief.primaryQuestion || '')
+                            .split('\n')
+                            .map((l) => l.trim())
+                            .filter((l) => /^\d+[).:]/.test(l))
+                            .map((l) => l.replace(/^\d+[).:\s]+/, '').trim())
+                            .slice(0, 6)
+                    }
+                };
+            }
+
+            if (section === 'objectives') {
+                return {
+                    success: true,
+                    sectionKey: 'objectives',
+                    section: {
+                        title: 'Objectives and Deliverables',
+                        objectives: Array.isArray(brief.expectedOutput) ? brief.expectedOutput : []
+                    }
+                };
+            }
+
+            if (section === 'events') {
+                return {
+                    success: true,
+                    sectionKey: 'events',
+                    section: {
+                        title: 'Business Events and Context',
+                        events: Array.isArray(brief.businessEvents) ? brief.businessEvents.map((e) => String(e).replace(/^[-—•]\s?/, '').trim()) : []
+                    }
+                };
+            }
+
+            return {
+                success: true,
+                sectionKey: 'insights',
+                section: {
+                    title: 'Key Insights',
+                    insights: Array.isArray(brief.keyInsights) ? brief.keyInsights : []
+                }
             };
         },
 
@@ -990,6 +1276,7 @@ const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
                 .select()
                 .single();
             if (error) throw new ApiError(500, error.message);
+            triggerPythonRagIndex(data);
             return { success: true, caseStudy: data };
         },
 
@@ -1058,21 +1345,12 @@ const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
                 .select()
                 .single();
             if (error) throw new ApiError(500, error.message);
+            triggerPythonRagIndex(data);
             return { success: true, caseStudy: data };
         },
 
         async deleteCaseStudy(caseStudyId) {
             if (!caseStudyId) throw new ApiError(400, 'caseStudyId is required');
-
-            const { count, error: countError } = await supabase
-                .from('assessment_sessions')
-                .select('id', { count: 'exact', head: true })
-                .eq('case_study_id', caseStudyId);
-            if (countError) throw new ApiError(500, countError.message);
-
-            if ((count || 0) > 0) {
-                throw new ApiError(409, 'Cannot delete this case study because attempts already exist. Mark it inactive instead.');
-            }
 
             const { data, error } = await supabase
                 .from('case_studies')
@@ -1080,8 +1358,36 @@ const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
                 .eq('id', caseStudyId)
                 .select('id, title')
                 .single();
-            if (error) throw new ApiError(500, error.message);
-            return { success: true, deleted: data };
+
+            if (!error) {
+                return { success: true, deleted: data, softDeleted: false };
+            }
+
+            const errMsg = String(error.message || '').toLowerCase();
+            const blockedByReferences =
+                errMsg.includes('foreign key') ||
+                errMsg.includes('violates') ||
+                errMsg.includes('constraint');
+
+            if (!blockedByReferences) {
+                throw new ApiError(500, error.message);
+            }
+
+            const { data: archived, error: archiveError } = await supabase
+                .from('case_studies')
+                .update({ is_active: false })
+                .eq('id', caseStudyId)
+                .select('id, title, is_active')
+                .single();
+
+            if (archiveError) throw new ApiError(500, archiveError.message);
+
+            return {
+                success: true,
+                deleted: archived,
+                softDeleted: true,
+                message: 'Case study had existing attempts, so it was deactivated and removed from active use.'
+            };
         },
 
         async assessResults() {
