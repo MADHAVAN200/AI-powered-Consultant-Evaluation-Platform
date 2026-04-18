@@ -381,6 +381,60 @@ const toSectionStorageKey = (raw = '') => String(raw || '')
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
 
+const prettifySectionLabel = (raw = '') => String(raw || '')
+    .replace(/[_\-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+
+const deriveCandidateSectionsFromParsed = (parsedSections = {}) => {
+    const sections = [];
+    const seen = new Set();
+
+    const pushSection = (section) => {
+        const heading = String(section?.heading || '').trim();
+        const content = String(section?.content || '').trim();
+        if (!heading || !content) return;
+
+        const keySeed = `${normalizeSectionHeadingForDedup(heading)}::${normalizeTextForComparison(content).slice(0, 220)}`;
+        if (seen.has(keySeed)) return;
+        seen.add(keySeed);
+
+        sections.push({
+            key: section.key,
+            heading,
+            role: section.role || 'other',
+            content
+        });
+    };
+
+    const llmSections = Array.isArray(parsedSections?._sections) ? parsedSections._sections : [];
+    if (llmSections.length > 0) {
+        llmSections.forEach((s, idx) => {
+            pushSection({
+                key: `section_${idx}`,
+                heading: String(s?.heading || `Section ${idx + 1}`),
+                role: String(s?.role || 'other'),
+                content: String(s?.content || '')
+            });
+        });
+        return sections;
+    }
+
+    Object.entries(parsedSections || {})
+        .filter(([k, v]) => !String(k).startsWith('_') && String(v || '').trim().length > 0)
+        .forEach(([k, v]) => {
+            pushSection({
+                key: `flat_${toSectionStorageKey(k)}`,
+                heading: prettifySectionLabel(k),
+                role: 'other',
+                content: String(v || '')
+            });
+        });
+
+    return sections;
+};
+
 const normalizeSectionHeadingForDedup = (heading = '') => {
     const base = String(heading || '')
         .toLowerCase()
@@ -1306,6 +1360,13 @@ ${extractionSource}`;
                 ? parsedSections[eventKeys[0]].split('\n').filter((l) => l.trim().startsWith('-')).slice(0, 5)
                 : ['Use the provided data trends and recent events to form hypotheses.'];
 
+            const candidateSections = deriveCandidateSectionsFromParsed(parsedSections)
+                .map((s) => ({
+                    key: s.key,
+                    label: s.heading,
+                    role: s.role
+                }));
+
             return {
                 success: true,
                 brief: {
@@ -1322,6 +1383,7 @@ ${extractionSource}`;
                         'Provide a structured, data-backed action plan.',
                         'Call out implementation risks and trade-offs.'
                     ],
+                    sections: candidateSections,
                     difficulty: 'Medium',
                     estimatedMinutes: 30
                 },
@@ -1331,6 +1393,38 @@ ${extractionSource}`;
 
         async getCaseStudyBriefSection(id, sectionKey) {
             const section = String(sectionKey || '').toLowerCase().trim();
+            if (!section) throw new ApiError(400, 'Invalid section key');
+
+            const { data: cs, error } = await supabase.from('case_studies').select('id, parsed_sections, initial_prompt').eq('id', id).single();
+            if (error || !cs) throw new ApiError(404, 'Case study not found');
+
+            const parsedSections = (cs.parsed_sections && typeof cs.parsed_sections === 'object') ? cs.parsed_sections : {};
+
+            if (section.startsWith('section_') || section.startsWith('flat_')) {
+                const derived = deriveCandidateSectionsFromParsed(parsedSections);
+                const found = derived.find((s) => String(s.key) === section);
+                if (!found) throw new ApiError(404, 'Section not found');
+
+                const bullets = found.content
+                    .split('\n')
+                    .map((l) => String(l || '').trim())
+                    .filter((l) => /^[-•*]\s+/.test(l))
+                    .map((l) => l.replace(/^[-•*]\s+/, '').trim())
+                    .filter(Boolean);
+
+                return {
+                    success: true,
+                    sectionKey: section,
+                    section: {
+                        title: found.heading,
+                        heading: found.heading,
+                        role: found.role,
+                        content: found.content,
+                        bullets
+                    }
+                };
+            }
+
             const allowedSections = new Set(['snapshot', 'problem', 'objectives', 'events', 'insights']);
             if (!allowedSections.has(section)) {
                 throw new ApiError(400, 'Invalid section key');
