@@ -205,6 +205,73 @@ const buildQuestionCoverage = (questions = [], allCandidateAnswers = '') => {
     return Math.round((covered / questions.length) * 100);
 };
 
+const extractProblemQuestions = (caseStudy = {}, fallback = 'Please diagnose the core problem and propose a quantified action plan.') => {
+    const parsedSections = caseStudy?.parsed_sections || caseStudy?.parsedSections || {};
+    const parsedQuestions = Array.isArray(parsedSections?._problemQuestions)
+        ? parsedSections._problemQuestions.map((q) => String(q || '').trim()).filter(Boolean)
+        : [];
+
+    if (parsedQuestions.length > 0) {
+        return parsedQuestions.map((text, idx) => ({
+            id: `q-${idx + 1}`,
+            index: idx,
+            text,
+            status: 'not_attempted',
+            attempted: false,
+            flagged: false,
+            attempts: 0,
+            lastScore: null
+        }));
+    }
+
+    const initialPrompt = caseStudy?.initial_prompt || caseStudy?.initialPrompt || '';
+    const lines = String(initialPrompt || '')
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
+
+    let numbered = lines
+        .filter((line) => /^\d+[).:]\s+/.test(line))
+        .map((line) => line.replace(/^\d+[).:]\s*/, '').trim())
+        .filter(Boolean);
+
+    if (numbered.length < 2) {
+        const flattened = String(initialPrompt || '').replace(/\s+/g, ' ').trim();
+        const inlineMatches = [...flattened.matchAll(/(?:^|\s)\d+[).:]\s*(.+?)(?=(?:\s+\d+[).:]\s)|$)/g)];
+        const inline = inlineMatches
+            .map((m) => String(m[1] || '').trim())
+            .filter((q) => q.length > 8);
+        if (inline.length > 0) numbered = inline;
+    }
+
+    const questions = numbered.length > 0 ? numbered : [fallback];
+    return questions.map((text, idx) => ({
+        id: `q-${idx + 1}`,
+        index: idx,
+        text,
+        status: 'not_attempted',
+        attempted: false,
+        flagged: false,
+        attempts: 0,
+        lastScore: null,
+        locked: false
+    }));
+};
+
+const isQuestionClosed = (q) => {
+    if (!q || typeof q !== 'object') return false;
+    if (q.status === 'passed') return true;
+    return q.status === 'failed' && Number(q.attempts || 0) >= 3;
+};
+
+const getNextOpenQuestionIndex = (questions = [], fromIndex = 0) => {
+    if (!Array.isArray(questions) || questions.length === 0) return -1;
+    for (let i = Math.max(0, fromIndex); i < questions.length; i += 1) {
+        if (!isQuestionClosed(questions[i])) return i;
+    }
+    return -1;
+};
+
 const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 const inferMetricUnit = (key = '', values = []) => {
@@ -359,6 +426,8 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
     const [theme, setTheme] = useState(getInitialTheme);
     const [leftWidth, setLeftWidth] = useState(() => window.innerWidth <= 1280 ? 280 : 300);
     const [rightWidth, setRightWidth] = useState(() => window.innerWidth <= 1280 ? 340 : 370);
+    const [questionTracker, setQuestionTracker] = useState([]);
+    const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
     const chatEndRef = useRef(null);
     const dashboardPath = userRole === 'admin' ? '/admin/dashboard' : '/candidate/dashboard';
 
@@ -409,6 +478,14 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
         return undefined;
     }, []);
 
+    useEffect(() => {
+        if (!session?.id || !Array.isArray(questionTracker) || questionTracker.length === 0) return;
+        localStorage.setItem(`assessment-question-tracker-${session.id}`, JSON.stringify({
+            questionTracker,
+            activeQuestionIndex
+        }));
+    }, [session?.id, questionTracker, activeQuestionIndex]);
+
     const applySessionData = (sess, cs) => {
         setSession(sess);
         setCaseStudy(cs);
@@ -424,6 +501,29 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
         setStrikes(sess.strikes || 0);
         setAttemptsLeft(Math.max(0, 3 - (sess.strikes || 0)));
         setCurrentStep(sess.current_step || 'diagnostic');
+        const extractedQuestions = extractProblemQuestions(cs || {});
+        const trackerStorageKey = `assessment-question-tracker-${sess.id}`;
+        const storedTrackerRaw = localStorage.getItem(trackerStorageKey);
+
+        if (storedTrackerRaw) {
+            try {
+                const parsed = JSON.parse(storedTrackerRaw);
+                const storedQuestions = Array.isArray(parsed?.questionTracker) ? parsed.questionTracker : [];
+                if (storedQuestions.length === extractedQuestions.length) {
+                    setQuestionTracker(storedQuestions);
+                    setActiveQuestionIndex(Math.max(0, Math.min(storedQuestions.length - 1, Number(parsed?.activeQuestionIndex || 0))));
+                } else {
+                    setQuestionTracker(extractedQuestions);
+                    setActiveQuestionIndex(0);
+                }
+            } catch {
+                setQuestionTracker(extractedQuestions);
+                setActiveQuestionIndex(0);
+            }
+        } else {
+            setQuestionTracker(extractedQuestions);
+            setActiveQuestionIndex(0);
+        }
         setLoading(false);
     };
 
@@ -457,11 +557,29 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
         e.preventDefault();
         if (!input.trim() || isSending || status !== 'active') return;
         const userMsg = input.trim();
+        const activeQuestion = questionTracker[activeQuestionIndex] || null;
+        if (activeQuestion && isQuestionClosed(activeQuestion)) {
+            setCoachNote('This question is closed (passed or 3 attempts completed). Move to another open question.');
+            return;
+        }
         setInput('');
         setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
         setIsSending(true);
         try {
-            const res = await axios.post(`${API_BASE}/assess/respond`, { sessionId: session.id, userMessage: userMsg, currentStep });
+            const res = await axios.post(`${API_BASE}/assess/respond`, {
+                sessionId: session.id,
+                userMessage: userMsg,
+                currentStep,
+                activeQuestion: activeQuestion
+                    ? {
+                        id: activeQuestion.id,
+                        index: activeQuestion.index,
+                        total: questionTracker.length,
+                        text: activeQuestion.text
+                    }
+                    : null,
+                enforcePerQuestionAttempts: true
+            });
             if (res.data.success) {
                 setMessages(prev => [...prev, { role: 'assistant', content: res.data.aiResponse }]);
                 setStatus(res.data.status);
@@ -471,6 +589,44 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                 setScoreBreakdown(res.data.scoreBreakdown || null);
                 setScoring(res.data.scoring || null);
                 if (res.data.conversationalFeedback) setCoachNote(res.data.conversationalFeedback);
+
+                let nextActiveIndex = activeQuestionIndex;
+                setQuestionTracker((prev) => {
+                    if (!Array.isArray(prev) || prev.length === 0) return prev;
+                    const idx = Math.max(0, Math.min(activeQuestionIndex, prev.length - 1));
+                    const questionResult = res.data.questionResult;
+                    const isPassed = questionResult
+                        ? Boolean(questionResult.passed)
+                        : Number(res.data?.scoreBreakdown?.totalScore || 0) >= 60;
+
+                    const next = [...prev];
+                    const current = next[idx];
+                    if (!current) return prev;
+
+                    const nextAttempts = Number(current.attempts || 0) + 1;
+                    const reachedLimit = nextAttempts >= 3;
+                    const closed = isPassed || reachedLimit;
+
+                    next[idx] = {
+                        ...current,
+                        attempted: true,
+                        flagged: closed ? false : current.flagged,
+                        attempts: nextAttempts,
+                        status: isPassed ? 'passed' : 'failed',
+                        lastScore: Number(res.data?.scoreBreakdown?.totalScore ?? current.lastScore),
+                        locked: closed
+                    };
+
+                    if (closed) {
+                        const nextOpen = getNextOpenQuestionIndex(next, idx + 1);
+                        if (nextOpen >= 0) {
+                            nextActiveIndex = nextOpen;
+                        }
+                    }
+
+                    return next;
+                });
+                setActiveQuestionIndex(nextActiveIndex);
             }
         } catch (err) {
             console.error('Chat error:', err);
@@ -489,12 +645,16 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
     const threshold = Number(caseStudy?.threshold_passing_score ?? 0.6);
     const passingMarks = Math.round((Number.isFinite(threshold) ? threshold : 0.6) * 100);
 
-    const problemLines = (caseStudy?.initial_prompt || '')
-        .split('\n')
-        .map(l => l.trim())
-        .filter(l => l.length > 0);
-
-    const numberedQs = problemLines.filter(l => /^\d+[).:]/.test(l));
+    const numberedQs = questionTracker.map((q) => q.text).filter(Boolean);
+    const activeQuestion = questionTracker[activeQuestionIndex] || null;
+    const activeQuestionAttempts = Number(activeQuestion?.attempts || 0);
+    const activeQuestionAttemptsLeft = Math.max(0, 3 - activeQuestionAttempts);
+    const activeQuestionClosed = Boolean(activeQuestion && isQuestionClosed(activeQuestion));
+    const allQuestionsClosed = questionTracker.length > 0 && questionTracker.every((q) => isQuestionClosed(q));
+    const attemptedQuestionCount = questionTracker.filter((q) => q.attempted).length;
+    const passedQuestionCount = questionTracker.filter((q) => q.status === 'passed').length;
+    const failedQuestionCount = questionTracker.filter((q) => q.status === 'failed').length;
+    const flaggedQuestionCount = questionTracker.filter((q) => q.flagged && !q.attempted).length;
 
     const candidateMessages = messages.filter((m) => m.role === 'user').map((m) => String(m.content || ''));
     const latestCandidateAnswer = candidateMessages[candidateMessages.length - 1] || '';
@@ -600,7 +760,35 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
     }, [metricRows, cockpitMetrics, questionCoverage, scoreBreakdown?.totalScore, latestCandidateAnswer, hasCandidateProgress]);
 
     const decisionImpact = useMemo(() => {
-        if (metricViewMode !== 'dynamic' || !hasCandidateProgress || !latestCandidateAnswer.trim()) return null;
+        if (!Array.isArray(metricRows) || metricRows.length === 0) return null;
+
+        if (!hasCandidateProgress || !latestCandidateAnswer.trim()) {
+            const baselineEntries = metricRows
+                .map((row) => {
+                    const first = Number(row.values?.[0] || 0);
+                    const last = Number(row.values?.[row.values.length - 1] || 0);
+                    const diff = last - first;
+                    if (!Number.isFinite(diff) || Math.abs(diff) < 0.0001) return null;
+
+                    const direction = getMetricDirection(row.key);
+                    const isImprovement = direction === 'higher' ? diff > 0 : diff < 0;
+                    return {
+                        isImprovement,
+                        magnitude: Math.abs(diff),
+                        text: `${row.label}: ${diff >= 0 ? '+' : ''}${formatMetricValue(diff, row.unit)}`
+                    };
+                })
+                .filter(Boolean)
+                .sort((a, b) => b.magnitude - a.magnitude);
+
+            return {
+                title: 'Case Metrics Overview',
+                improved: baselineEntries.filter((e) => e.isImprovement).slice(0, 4).map((e) => e.text),
+                worsened: baselineEntries.filter((e) => !e.isImprovement).slice(0, 4).map((e) => e.text),
+                missed: [],
+                isBaseline: true
+            };
+        }
 
         const baseMap = Object.fromEntries(metricRows.map((m) => [m.key, m.values[m.values.length - 1] || 0]));
         const dynamicMap = Object.fromEntries(dynamicMetricRows.map((m) => [m.key, m.values[m.values.length - 1] || 0]));
@@ -621,11 +809,13 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
 
         const missed = cockpitMetrics.filter((m) => !m.touched).slice(0, 3).map((m) => m.label);
         return {
+            title: 'Latest Answer Impact',
             improved: improved.slice(0, 4),
             worsened: worsened.slice(0, 4),
-            missed
+            missed,
+            isBaseline: false
         };
-    }, [metricViewMode, latestCandidateAnswer, metricRows, dynamicMetricRows, cockpitMetrics, hasCandidateProgress]);
+    }, [latestCandidateAnswer, metricRows, dynamicMetricRows, cockpitMetrics, hasCandidateProgress]);
 
     const displayedRows = metricViewMode === 'case' ? metricRows : dynamicMetricRows;
     const displayedKpis = metricViewMode === 'case' ? staticKpis : (hasCandidateProgress ? cockpitMetrics : staticKpis);
@@ -717,6 +907,36 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                             </button>
                         ))}
                     </nav>
+                </SidebarCard>
+
+                <SidebarCard label="Question Tracker" variant="accent">
+                    <div className="question-tracker-summary">
+                        <p>Attempted {attemptedQuestionCount}/{questionTracker.length || 0}</p>
+                        <p>Passed {passedQuestionCount} · Failed {failedQuestionCount} · Later {flaggedQuestionCount}</p>
+                    </div>
+                    <div className="question-tracker-list" role="list" aria-label="Problem question status tracker">
+                        {questionTracker.map((q, idx) => {
+                            const stateClass = q.flagged && !q.attempted ? 'flagged' : q.status;
+                            return (
+                                <button
+                                    key={q.id}
+                                    role="listitem"
+                                    className={`question-chip question-chip--${stateClass} ${activeQuestionIndex === idx ? 'active' : ''}`}
+                                    onClick={() => setActiveQuestionIndex(idx)}
+                                    title={q.text}
+                                >
+                                    <span className="question-chip__index">Q{idx + 1}</span>
+                                    <span className="question-chip__text">{q.text}</span>
+                                </button>
+                            );
+                        })}
+                    </div>
+                    <div className="question-legend" aria-label="Question status legend">
+                        <span><i className="dot dot--grey" />Not attempted</span>
+                        <span><i className="dot dot--green" />Attempted and passed</span>
+                        <span><i className="dot dot--red" />Attempted and failed</span>
+                        <span><i className="dot dot--yellow" />Flagged for later</span>
+                    </div>
                 </SidebarCard>
             </aside>
 
@@ -1016,9 +1236,45 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                         </div>
                     </div>
 
+                    {activeQuestion && (
+                        <div className="active-question-box">
+                            <p className="active-question-box__label">Current problem statement</p>
+                            <p className="active-question-box__title">Question {activeQuestion.index + 1} of {questionTracker.length}</p>
+                            <p className="active-question-box__text">{activeQuestion.text}</p>
+                            <div className="active-question-box__actions">
+                                <button
+                                    type="button"
+                                    className="btn-flag"
+                                    onClick={() => {
+                                        setQuestionTracker((prev) => prev.map((q, idx) => idx === activeQuestionIndex
+                                            ? (() => {
+                                                const nextFlagged = !q.flagged;
+                                                return {
+                                                    ...q,
+                                                    flagged: nextFlagged,
+                                                    status: q.attempted ? q.status : (nextFlagged ? 'flagged' : 'not_attempted')
+                                                };
+                                            })()
+                                            : q));
+                                    }}
+                                >
+                                    {activeQuestion.flagged ? 'Unflag' : 'Flag for later'}
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn-next-question"
+                                    onClick={() => setActiveQuestionIndex((prev) => Math.min(questionTracker.length - 1, prev + 1))}
+                                    disabled={activeQuestionIndex >= questionTracker.length - 1}
+                                >
+                                    Next Question
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
                     {decisionImpact && (
                         <div className="decision-impact-box">
-                            <p className="decision-impact-title">Latest Answer Impact</p>
+                            <p className="decision-impact-title">{decisionImpact.title || 'Metric Overview'}</p>
                             {decisionImpact.improved.length > 0 && (
                                 <div>
                                     <p className="impact-sub impact-sub--good">Improved Signals</p>
@@ -1035,7 +1291,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                                     </ul>
                                 </div>
                             )}
-                            {decisionImpact.missed.length > 0 && (
+                            {!decisionImpact.isBaseline && decisionImpact.missed.length > 0 && (
                                 <p className="impact-missed">Missed metrics: {decisionImpact.missed.join(', ')}</p>
                             )}
                         </div>
@@ -1058,32 +1314,34 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                     <div ref={chatEndRef} />
                 </div>
 
-                {status === 'active' ? (
+                {status === 'active' && !allQuestionsClosed ? (
                     <form className="chat-input-form" onSubmit={handleSendMessage}>
                         <div className="chat-input-wrap">
                             <textarea
                                 className="chat-textarea"
                                 value={input}
                                 onChange={(e) => setInput(e.target.value)}
-                                placeholder="Respond with diagnosis, numbers, recommendations, and risk"
+                                placeholder={activeQuestionClosed ? 'This question is closed. Select another open question.' : 'Respond with diagnosis, numbers, recommendations, and risk'}
                                 onKeyDown={(e) => {
                                     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(e); }
                                 }}
                                 rows={3}
+                                disabled={activeQuestionClosed}
                             />
-                            <button type="submit" className="chat-send-btn" disabled={isSending || !input.trim()} aria-label="Send">
+                            <button type="submit" className="chat-send-btn" disabled={isSending || !input.trim() || activeQuestionClosed} aria-label="Send">
                                 <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
                                     <path d="M3 11.5L21 3L13.5 21L11 13L3 11.5Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
                                 </svg>
                             </button>
                         </div>
                         <p className="input-hint">Coach hint: {coachNote}</p>
+                        <p className="input-hint">Question attempts left: {activeQuestionAttemptsLeft}/3</p>
                     </form>
                 ) : (
                     <div className="session-conclusion">
-                        <div className="conclusion-icon">{status === 'completed' ? '✅' : '🚫'}</div>
-                        <h2>{status === 'completed' ? 'Assessment Concluded' : 'Session Terminated'}</h2>
-                        <p>{status === 'completed' ? 'Your responses have been submitted.' : 'Session ended due to logical consistency thresholds.'}</p>
+                        <div className="conclusion-icon">{allQuestionsClosed || status === 'completed' ? '✅' : '🚫'}</div>
+                        <h2>{allQuestionsClosed || status === 'completed' ? 'Assessment Concluded' : 'Session Terminated'}</h2>
+                        <p>{allQuestionsClosed ? 'All questions are closed (passed or 3 attempts used). Your responses have been captured.' : status === 'completed' ? 'Your responses have been submitted.' : 'Session ended due to logical consistency thresholds.'}</p>
                         <button className="btn-primary" onClick={() => navigate(dashboardPath)}>RETURN TO DASHBOARD</button>
                     </div>
                 )}
