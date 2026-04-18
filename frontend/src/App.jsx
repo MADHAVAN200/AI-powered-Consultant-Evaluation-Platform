@@ -10,6 +10,22 @@ import CandidateAssessment from './pages/CandidateAssessment';
 import LoginOverlay from './components/LoginOverlay';
 import { useData, DataProvider } from './context/DataContext';
 
+const getSystemTheme = () => (
+  window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+    ? 'dark'
+    : 'light'
+);
+
+const getInitialTheme = () => {
+  const stored = localStorage.getItem('theme');
+  if (stored === 'light' || stored === 'dark') return stored;
+
+  const attrTheme = document.documentElement.getAttribute('data-theme');
+  if (attrTheme === 'light' || attrTheme === 'dark') return attrTheme;
+
+  return getSystemTheme();
+};
+
 const adminNavItems = [
   { path: '/admin/dashboard', id: 'dashboard', label: 'DASHBOARD' },
   { path: '/admin/cases', id: 'cases', label: 'CASE STUDIES' },
@@ -78,16 +94,37 @@ const TopBar = ({ theme, toggleTheme }) => {
 function AppContent() {
   const { userEmail, userRole } = useData();
   const location = useLocation();
-  const [theme, setTheme] = useState('light');
+  const [theme, setTheme] = useState(getInitialTheme);
+  const homePath = userRole === 'admin' ? '/admin/dashboard' : '/candidate/dashboard';
 
   const toggleTheme = () => {
     const newTheme = theme === 'light' ? 'dark' : 'light';
     setTheme(newTheme);
+    localStorage.setItem('theme', newTheme);
     document.documentElement.setAttribute('data-theme', newTheme);
   };
 
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', 'light');
+    document.documentElement.setAttribute('data-theme', theme);
+  }, [theme]);
+
+  useEffect(() => {
+    if (localStorage.getItem('theme')) return undefined;
+
+    const media = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = (e) => setTheme(e.matches ? 'dark' : 'light');
+
+    if (typeof media.addEventListener === 'function') {
+      media.addEventListener('change', onChange);
+      return () => media.removeEventListener('change', onChange);
+    }
+
+    if (typeof media.addListener === 'function') {
+      media.addListener(onChange);
+      return () => media.removeListener(onChange);
+    }
+
+    return undefined;
   }, []);
 
   // Public assessment routes (via invite links) don't require login
@@ -111,24 +148,19 @@ function AppContent() {
         {!isAssessmentRoute && <TopBar theme={theme} toggleTheme={toggleTheme} />}
         <div className={`content-area ${isAssessmentRoute ? 'assessment-route-content' : ''}`}>
           <Routes>
-            {userRole === 'admin' ? (
-                <>
-                    <Route path="/" element={<Navigate to="/admin/dashboard" replace />} />
-                    <Route path="/admin/dashboard" element={<AdminDashboard />} />
-                    <Route path="/admin/cases" element={<AdminEvaluation />} />
-                    <Route path="/admin/results" element={<AdminResults />} />
-                    <Route path="/assess/invite/:inviteId" element={<CandidateAssessment />} />
-                </>
-            ) : (
-                <>
-                <Route path="/" element={<Navigate to="/candidate/dashboard" replace />} />
-                <Route path="/candidate/dashboard" element={<CandidateDashboard />} />
-                <Route path="/candidate/cases" element={<CandidateCaseStudies />} />
-                <Route path="/candidate/results" element={<CandidateResults />} />
-                <Route path="/candidate/assessment/:caseStudyId" element={<CandidateAssessment isDirectCase={true} />} />
-                    <Route path="/assess/invite/:inviteId" element={<CandidateAssessment />} />
-                </>
-            )}
+            <Route path="/" element={<Navigate to={homePath} replace />} />
+
+            <Route path="/admin/dashboard" element={userRole === 'admin' ? <AdminDashboard /> : <Navigate to={homePath} replace />} />
+            <Route path="/admin/cases" element={userRole === 'admin' ? <AdminEvaluation /> : <Navigate to={homePath} replace />} />
+            <Route path="/admin/results" element={userRole === 'admin' ? <AdminResults /> : <Navigate to={homePath} replace />} />
+
+            <Route path="/candidate/dashboard" element={userRole === 'candidate' ? <CandidateDashboard /> : <Navigate to={homePath} replace />} />
+            <Route path="/candidate/cases" element={userRole === 'candidate' ? <CandidateCaseStudies /> : <Navigate to={homePath} replace />} />
+            <Route path="/candidate/results" element={userRole === 'candidate' ? <CandidateResults /> : <Navigate to={homePath} replace />} />
+            <Route path="/candidate/assessment/:caseStudyId" element={<CandidateAssessment isDirectCase={true} />} />
+
+            <Route path="/assess/invite/:inviteId" element={<CandidateAssessment />} />
+            <Route path="*" element={<Navigate to={homePath} replace />} />
           </Routes>
         </div>
       </main>

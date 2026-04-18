@@ -52,6 +52,8 @@ const LoginOverlay = ({ theme, toggleTheme }) => {
                         <label style={{ fontSize: '0.65rem', fontWeight: '800', opacity: 0.7, marginBottom: '6px', display: 'block', color: 'var(--text-primary)' }}>USER IDENTIFIER</label>
                         <input 
                             type="text" 
+                            name="username"
+                            autoComplete="username"
                             className="login-input" 
                             placeholder="admin / user"
                             value={username}
@@ -65,6 +67,8 @@ const LoginOverlay = ({ theme, toggleTheme }) => {
                         <label style={{ fontSize: '0.65rem', fontWeight: '800', opacity: 0.7, marginBottom: '6px', display: 'block', color: 'var(--text-primary)' }}>SECURITY TOKEN (PASSWORD)</label>
                         <input 
                             type="password" 
+                            name="password"
+                            autoComplete="current-password"
                             className="login-input" 
                             placeholder="••••••••"
                             value={password}

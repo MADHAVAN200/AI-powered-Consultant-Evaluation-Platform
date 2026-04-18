@@ -95,7 +95,8 @@ const AdminEvaluation = () => {
     const fetchCases = async () => {
         try {
             const res = await axios.get(`${API_BASE}/admin/case-studies`);
-            setCaseStudies(res.data?.caseStudies || []);
+            const rows = res.data?.caseStudies || [];
+            setCaseStudies(rows.filter((row) => row?.is_active !== false));
         } catch { setCaseStudies([]); }
     };
 
