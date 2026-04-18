@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import chromadb
+from chromadb.config import Settings
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
@@ -35,6 +36,9 @@ def _load_env_file(path: Path) -> None:
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 _load_env_file(BACKEND_DIR / ".env")
 
+# Suppress Chroma telemetry calls that can fail noisily in some local environments.
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "FALSE")
+
 RAG_EMBEDDING_MODEL = os.getenv("RAG_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 GROQ_MODEL = os.getenv("RAG_GROQ_MODEL", "llama-3.3-70b-versatile")
 CHROMA_COLLECTION = os.getenv("RAG_CHROMA_COLLECTION", "case_chunks")
@@ -45,7 +49,10 @@ RAG_DEBUG_LOGS = str(os.getenv("RAG_DEBUG_LOGS", "")).strip().lower() in {"1", "
 embeddings = HuggingFaceEmbeddings(model_name=RAG_EMBEDDING_MODEL)
 splitter = RecursiveCharacterTextSplitter(chunk_size=900, chunk_overlap=140)
 Path(CHROMA_PERSIST_DIR).mkdir(parents=True, exist_ok=True)
-_chroma_client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+_chroma_client = chromadb.PersistentClient(
+    path=CHROMA_PERSIST_DIR,
+    settings=Settings(anonymized_telemetry=False)
+)
 
 
 def _get_collection():

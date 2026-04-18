@@ -332,13 +332,121 @@ const extractProblemQuestionsFromText = (problemText = '', fallbackFullText = ''
 
     if (inlineQuestions.length >= 2) return inlineQuestions;
 
+    // Additional fallback: bullet/question line candidates.
+    const bulletCandidates = source
+        .split('\n')
+        .map((l) => String(l || '').trim())
+        .filter((l) => /^[-•*]\s+/.test(l) || /\?$/.test(l))
+        .map((l) => l.replace(/^[-•*]\s+/, '').trim())
+        .filter((q) => q.length > 12);
+    if (bulletCandidates.length >= 2) return bulletCandidates.slice(0, 8);
+
     // Final fallback: detect numbered prompts in full text globally.
     const globalMatches = [...String(fallbackFullText || '').matchAll(/(?:^|\n)\s*(\d+)[).:]\s+(.{8,})(?=\n|$)/g)];
-    return globalMatches
+    const globalQuestions = globalMatches
         .map((m) => ({ order: Number(m[1] || 0), text: String(m[2] || '').trim() }))
         .filter((q) => q.order > 0 && q.text.length > 8)
         .sort((a, b) => a.order - b.order)
         .map((q) => q.text);
+
+    if (globalQuestions.length >= 2) return globalQuestions;
+
+    // Last-resort semantic extraction from long task-like lines.
+    return source
+        .split('\n')
+        .map((l) => String(l || '').trim())
+        .filter((l) => /(?:identify|analy[sz]e|propose|recommend|evaluate|assess|quantify|calculate|how|what|why)/i.test(l))
+        .filter((l) => l.length > 18)
+        .slice(0, 6);
+};
+
+const extractQuestionsFromSections = (sections = {}, fallbackText = '') => {
+    const entries = Object.entries(sections || {});
+    if (entries.length === 0) return extractProblemQuestionsFromText('', fallbackText);
+
+    const priorityBuckets = entries
+        .filter(([heading]) => /problem|question|objective|task|deliverable|ask/i.test(String(heading || '')))
+        .map(([, body]) => String(body || '').trim())
+        .filter(Boolean);
+
+    const source = priorityBuckets.length > 0
+        ? priorityBuckets.join('\n\n')
+        : entries.map(([, body]) => String(body || '').trim()).join('\n\n');
+
+    return extractProblemQuestionsFromText(source, fallbackText);
+};
+
+const toSectionStorageKey = (raw = '') => String(raw || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
+const normalizeSectionHeadingForDedup = (heading = '') => {
+    const base = String(heading || '')
+        .toLowerCase()
+        .replace(/[()\[\]{}]/g, ' ')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    if (!base) return '';
+    if (/^(problem|problem statement|case question|questions|objectives?|tasks?)$/.test(base)) return 'problem_statement';
+    if (/^(overview|context|background|company overview|introduction)$/.test(base)) return 'overview';
+    if (/^(opening prompt|initial prompt|interview prompt|prompt)$/.test(base)) return 'opening_prompt';
+    return base;
+};
+
+const normalizeTextForComparison = (value = '') => String(value || '')
+    .replace(/\s+/g, ' ')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .trim()
+    .toLowerCase();
+
+const mergeSectionBodies = (existingBody = '', nextBody = '') => {
+    const a = normalizeTextForComparison(existingBody);
+    const b = normalizeTextForComparison(nextBody);
+    if (!a) return String(nextBody || '').trim();
+    if (!b) return String(existingBody || '').trim();
+
+    if (a === b) return String(existingBody || '').trim();
+    if (a.includes(b)) return String(existingBody || '').trim();
+    if (b.includes(a)) return String(nextBody || '').trim();
+
+    return `${String(existingBody || '').trim()}\n\n${String(nextBody || '').trim()}`.trim();
+};
+
+const dedupeSectionsObject = (sections = {}) => {
+    const byCanonicalHeading = new Map();
+
+    for (const [heading, rawBody] of Object.entries(sections || {})) {
+        const body = String(rawBody || '').trim();
+        const headingText = String(heading || '').trim();
+        if (!headingText || body.length < 4) continue;
+
+        const normalizedHeading = normalizeSectionHeadingForDedup(headingText);
+        if (!normalizedHeading) continue;
+
+        if (!byCanonicalHeading.has(normalizedHeading)) {
+            byCanonicalHeading.set(normalizedHeading, {
+                heading: headingText,
+                body
+            });
+            continue;
+        }
+
+        const existing = byCanonicalHeading.get(normalizedHeading);
+        byCanonicalHeading.set(normalizedHeading, {
+            heading: existing.heading.length >= headingText.length ? existing.heading : headingText,
+            body: mergeSectionBodies(existing.body, body)
+        });
+    }
+
+    const finalSections = {};
+    for (const { heading, body } of byCanonicalHeading.values()) {
+        finalSections[heading] = body;
+    }
+    return finalSections;
 };
 
 const generateCaseDraftFromPdf = (pdfText, options = {}) => {
@@ -353,7 +461,8 @@ const generateCaseDraftFromPdf = (pdfText, options = {}) => {
     const industry = inferIndustryFromText(text);
 
     const sectionsFromBold = discoverSectionsByHeadingList(text, boldHeadings);
-    const sections = Object.keys(sectionsFromBold).length > 0 ? sectionsFromBold : discoverAllSections(text);
+    const discoveredSections = Object.keys(sectionsFromBold).length > 0 ? sectionsFromBold : discoverAllSections(text);
+    const sections = dedupeSectionsObject(discoveredSections);
 
     const numericSeries = extractAllNumericSeries(text);
 
@@ -363,7 +472,7 @@ const generateCaseDraftFromPdf = (pdfText, options = {}) => {
     const context = contextParts.length > 100 ? contextParts : text;
 
     const problemStatement = extractProblemStatement(sections, text);
-    const problemQuestions = extractProblemQuestionsFromText(problemStatement, text);
+    const problemQuestions = extractQuestionsFromSections(sections, text);
     const questionLines = (problemQuestions.length > 0
         ? problemQuestions.map((q, idx) => `${idx + 1}) ${q}`)
         : problemStatement
@@ -781,6 +890,179 @@ const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
         }
 
         return getRuleBasedEvaluation(userMessage, currentStep);
+    };
+
+    const refineImportedCaseDraftWithLlm = async (rawPdfText, heuristicDraft) => {
+        const safeDraft = heuristicDraft && typeof heuristicDraft === 'object' ? heuristicDraft : {};
+        if (!rawPdfText || groqClients.length === 0) return safeDraft;
+
+        const compactText = String(rawPdfText || '').replace(/\s+/g, ' ').trim();
+        if (compactText.length < 300) return safeDraft;
+
+        const head = compactText.slice(0, 18000);
+        const tail = compactText.length > 22000 ? compactText.slice(-4000) : '';
+        const extractionSource = tail ? `${head}\n\n[TAIL OF DOCUMENT]\n${tail}` : head;
+
+        // ─── Dynamic LLM prompt ─────────────────────────────────────────────────
+        // The LLM discovers ALL sections present in the document without any
+        // hard-coded assumptions. Each section gets a ROLE tag so the frontend
+        // and any future decoder knows exactly what the section represents.
+        // Stored as _sections[] for easy decode later.
+        const prompt = `You are a document parser. Extract a consulting case study PDF into structured JSON.
+
+STRICT RULES:
+1. Return VALID JSON only — no markdown, no prose, no explanation.
+2. Do NOT invent sections that do not exist in the source document.
+3. If a concept (e.g. financial data, problem statement) is absent from the document, omit it entirely — do not fabricate placeholder content.
+4. Extract ALL distinct sections present in the document.
+5. Normalize heading names to clean human-readable titles (e.g. "Company Overview", "Problem Statement", "Financial Data").
+6. No duplicate headings — if two headings are near-identical, merge their content under one heading.
+7. Preserve all factual details, numbers, and specifics from the source.
+
+SECTION ROLES (assign exactly one per section):
+  "context"  — background, company overview, market/industry context, introduction
+  "problem"  — the challenge, problem posed, tasks or questions asked of the candidate
+  "prompt"   — opening interview statement or candidate prompt (if explicitly present)
+  "data"     — financial tables, KPIs, metrics, numerical data, exhibits
+  "other"    — any other named section (appendix, guidelines, evaluation rubric, etc.)
+
+QUESTION EXTRACTION:
+  - In "problemQuestions", list ONLY the explicit questions/tasks the candidate must answer.
+  - These are usually numbered (1. 2. 3.) or bulleted in the Problem/Questions section.
+  - Extract them verbatim or lightly cleaned. Do NOT paraphrase or invent new ones.
+  - If no explicit questions are found, return an empty array [].
+
+INITIAL PROMPT:
+  - Generate a concise (2–4 sentence) opening message a case interviewer would say to introduce this case.
+  - Reference the case title and the top-level business problem.
+  - If a "prompt" role section already exists in the document, use its content verbatim instead.
+
+JSON SCHEMA — return EXACTLY this shape:
+{
+  "title": "<the case study title>",
+  "industry": "<industry/domain e.g. E-commerce, FinTech, Healthcare, Logistics>",
+  "sections": [
+    {
+      "heading": "<clean section name>",
+      "content": "<full verbatim section content from the document>",
+      "role": "context | problem | prompt | data | other"
+    }
+  ],
+  "problemQuestions": ["<question 1>", "<question 2>"],
+  "initialPrompt": "<opening message for the candidate>"
+}
+
+SOURCE DOCUMENT:
+${extractionSource}`;
+
+        for (let attempt = 0; attempt < groqClients.length; attempt += 1) {
+            const client = groqClients[(attempt + (groqClients.length - 1)) % groqClients.length] || groqClients[0];
+            try {
+                const completion = await client.chat.completions.create({
+                    messages: [{ role: 'user', content: prompt }],
+                    model: 'llama-3.3-70b-versatile',
+                    response_format: { type: 'json_object' }
+                });
+
+                const parsed = safeJson(completion.choices[0]?.message?.content, null);
+                if (!parsed || typeof parsed !== 'object') throw new Error('Invalid parser JSON');
+
+                // ── Build clean, deduped, role-tagged sections array ─────────
+                // Stored as _sections[] so any downstream decoder (admin UI,
+                // RAG indexer, future export tooling) can read the structure
+                // without re-parsing.
+                const llmSectionsRaw = Array.isArray(parsed.sections) ? parsed.sections : [];
+                const seenHeadingNorms = new Set();
+                const cleanSections = [];
+
+                for (const item of llmSectionsRaw) {
+                    const heading = String(item?.heading || '').trim();
+                    const content = String(item?.content || '').trim();
+                    const role = ['context', 'problem', 'prompt', 'data', 'other'].includes(String(item?.role || ''))
+                        ? String(item.role)
+                        : 'other';
+
+                    if (!heading || content.length < 8) continue;
+
+                    // Normalised key for dedup
+                    const normKey = normalizeHeadingKey(heading);
+                    if (seenHeadingNorms.has(normKey)) continue;
+                    seenHeadingNorms.add(normKey);
+
+                    cleanSections.push({ heading, content, role });
+                }
+
+                // ── Extract problem questions ────────────────────────────────
+                const llmQuestions = Array.isArray(parsed.problemQuestions)
+                    ? parsed.problemQuestions.map((q) => String(q || '').trim()).filter((q) => q.length > 8)
+                    : [];
+
+                // Fallback: mine questions from problem-role sections
+                const problemQuestions = llmQuestions.length > 0
+                    ? llmQuestions
+                    : extractQuestionsFromSections(
+                        Object.fromEntries(
+                            cleanSections
+                                .filter((s) => s.role === 'problem')
+                                .map((s) => [s.heading, s.content])
+                        ),
+                        safeDraft.rawContent || rawPdfText || ''
+                    );
+
+                // ── Preserve numeric series from heuristic pass ──────────────
+                const existingNumericSeries = (
+                    safeDraft.parsedSections &&
+                    typeof safeDraft.parsedSections._numericSeries === 'object'
+                )
+                    ? safeDraft.parsedSections._numericSeries
+                    : {};
+
+                // ── Resolve context, problemStatement, initialPrompt ─────────
+                const contextSection = cleanSections.find((s) => s.role === 'context');
+                const problemSection = cleanSections.find((s) => s.role === 'problem');
+                const promptSection = cleanSections.find((s) => s.role === 'prompt');
+
+                const resolvedContext = contextSection?.content || safeDraft.context || '';
+                const resolvedProblemStatement = problemSection?.content || safeDraft.problemStatement || '';
+                const resolvedInitialPrompt =
+                    String(parsed.initialPrompt || '').trim() ||
+                    promptSection?.content ||
+                    safeDraft.initialPrompt ||
+                    `Welcome to your case study: "${parsed.title || safeDraft.title || 'Case Study'}". Please begin by sharing your diagnostic hypothesis.`;
+
+                return {
+                    ...safeDraft,
+                    title: String(parsed.title || '').trim() || safeDraft.title || 'Imported Case Study',
+                    industry: String(parsed.industry || '').trim() || safeDraft.industry || inferIndustryFromText(rawPdfText || ''),
+                    context: resolvedContext,
+                    problemStatement: resolvedProblemStatement,
+                    initialPrompt: resolvedInitialPrompt,
+                    parsedSections: {
+                        // ── _sections: primary structured store (role-tagged, decodable) ──
+                        _sections: cleanSections,
+                        // ── _problemQuestions: flat question list for interview engine ──
+                        _problemQuestions: problemQuestions,
+                        // ── _numericSeries: numeric time-series for chart rendering ──
+                        _numericSeries: existingNumericSeries,
+                        // ── _llmExtracted: audit flag ───────────────────────────────
+                        _llmExtracted: true
+                    }
+                };
+            } catch {
+                getNextGroqClient();
+            }
+        }
+
+        // LLM completely failed — return heuristic draft as-is with a flag
+        // The heuristic parsedSections (flat object keys) will be used by
+        // the frontend as a graceful fallback.
+        return {
+            ...safeDraft,
+            parsedSections: {
+                ...(safeDraft.parsedSections || {}),
+                _llmExtracted: false
+            }
+        };
     };
 
     return {
@@ -1292,9 +1574,19 @@ const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
             if (!file || !file.buffer) throw new ApiError(400, 'PDF file is required (field name: pdf).');
             const parsed = await pdfParse(file.buffer);
             const boldHeadings = await extractBoldHeadingsFromPdfBuffer(file.buffer);
-            const draft = generateCaseDraftFromPdf(parsed.text || '', { boldHeadings });
-            const sectionCount = Object.keys(draft.parsedSections).filter((k) => k !== '_numericSeries').length;
-            const seriesCount = Object.keys(draft.financialData).length;
+            const heuristicDraft = generateCaseDraftFromPdf(parsed.text || '', { boldHeadings });
+            const draft = await refineImportedCaseDraftWithLlm(parsed.text || '', heuristicDraft);
+
+            // _sections[] is the LLM-extracted structured store
+            // Fall back to counting flat heuristic keys if LLM failed
+            const llmSections = Array.isArray(draft.parsedSections?._sections)
+                ? draft.parsedSections._sections
+                : [];
+            const heuristicFlatKeys = Object.keys(draft.parsedSections || {})
+                .filter((k) => !String(k).startsWith('_'));
+            const sectionCount = llmSections.length || heuristicFlatKeys.length;
+            const seriesCount = Object.keys(draft.financialData || {}).length;
+            const llmExtracted = Boolean(draft.parsedSections?._llmExtracted);
 
             return {
                 success: true,
@@ -1305,7 +1597,9 @@ const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
                     textLength: (parsed.text || '').length,
                     sectionsDiscovered: sectionCount,
                     numericSeriesFound: seriesCount,
-                    boldHeadingsDetected: boldHeadings.length
+                    boldHeadingsDetected: boldHeadings.length,
+                    llmExtracted,
+                    llmSectionsCount: llmSections.length
                 }
             };
         },
