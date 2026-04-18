@@ -398,6 +398,118 @@ const MetricLineChart = ({ label, values = [], xLabels = [], unit = 'count' }) =
     );
 };
 
+const getParsedSectionsFromCase = (caseStudy = {}) => {
+    const rawSections = caseStudy?.parsed_sections ?? caseStudy?.parsedSections ?? {};
+    if (rawSections && typeof rawSections === 'object') return rawSections;
+    if (typeof rawSections === 'string') {
+        try {
+            const parsed = JSON.parse(rawSections);
+            return parsed && typeof parsed === 'object' ? parsed : {};
+        } catch {
+            return {};
+        }
+    }
+    return {};
+};
+
+const normalizeMockDrillMode = (caseStudy = {}) => {
+    const parsedSections = getParsedSectionsFromCase(caseStudy);
+    const caseModeRaw = parsedSections?._caseMode || caseStudy?.case_mode || caseStudy?.caseMode || '';
+    const caseMode = String(caseModeRaw).toLowerCase().replace(/[\s-]+/g, '_');
+    const enabledByMode = ['mock_drill_chat', 'mock_drill', 'mockdrill_chat', 'mockdrill', 'simulation_chat'].includes(caseMode);
+    const hasLeverConfig = Array.isArray(parsedSections?._mockDrill?.levers) && parsedSections._mockDrill.levers.length > 0;
+    const enabledByFlag = parsedSections?._mockDrill?.enabled === true;
+    return enabledByMode || enabledByFlag || hasLeverConfig;
+};
+
+const buildDefaultLeversFromMetrics = (financialData = {}) => {
+    return Object.entries(financialData || {})
+        .filter(([, values]) => Array.isArray(values) && values.length > 1)
+        .slice(0, 8)
+        .map(([metricKey, values], idx) => ({
+            id: `${metricKey}_${idx + 1}`,
+            group: /revenue|profit|margin|cost|cash|ebitda/.test(metricKey) ? 'Financial' : /churn|customer|nps|cac|ltv|conversion/.test(metricKey) ? 'Market' : /delay|delivery|ops|inventory|utilization/.test(metricKey) ? 'Operations' : 'Strategy',
+            label: `${prettifyMetricLabel(metricKey)} Lever`,
+            metricKey,
+            min: -30,
+            max: 30,
+            step: 5,
+            defaultValue: 0,
+            weight: 1,
+            _baselineValues: values.map(Number).filter(Number.isFinite)
+        }));
+};
+
+const resolveMockDrillLevers = (caseStudy = {}) => {
+    const parsedSections = getParsedSectionsFromCase(caseStudy);
+    const configured = Array.isArray(parsedSections?._mockDrill?.levers) ? parsedSections._mockDrill.levers : [];
+    if (configured.length > 0) {
+        return configured.map((lever, idx) => ({
+            id: String(lever.id || `${lever.metricKey || 'metric'}_${idx + 1}`),
+            group: String(lever.group || 'Strategy'),
+            label: String(lever.label || prettifyMetricLabel(lever.metricKey || `lever_${idx + 1}`)),
+            metricKey: String(lever.metricKey || ''),
+            min: Number.isFinite(Number(lever.min)) ? Number(lever.min) : -30,
+            max: Number.isFinite(Number(lever.max)) ? Number(lever.max) : 30,
+            step: Number.isFinite(Number(lever.step)) && Number(lever.step) > 0 ? Number(lever.step) : 5,
+            defaultValue: Number.isFinite(Number(lever.defaultValue)) ? Number(lever.defaultValue) : 0,
+            weight: Number.isFinite(Number(lever.weight)) ? Number(lever.weight) : 1
+        })).filter((l) => l.metricKey);
+    }
+
+    return buildDefaultLeversFromMetrics(caseStudy?.financial_data || {});
+};
+
+const applyMockDrillToMetricRows = (baseRows = [], levers = [], valuesByLeverId = {}) => {
+    if (!Array.isArray(baseRows) || baseRows.length === 0) return [];
+    const rows = baseRows.map((row) => ({ ...row, values: [...(row.values || [])] }));
+    const metricLevers = {};
+    for (const lever of levers || []) {
+        if (!lever?.metricKey) continue;
+        if (!metricLevers[lever.metricKey]) metricLevers[lever.metricKey] = [];
+        metricLevers[lever.metricKey].push(lever);
+    }
+
+    return rows.map((row) => {
+        const linkedLevers = metricLevers[row.key] || [];
+        if (linkedLevers.length === 0) return row;
+
+        const nextValues = [...row.values];
+        const multiplier = linkedLevers.reduce((acc, lever) => {
+            const current = Number(valuesByLeverId?.[lever.id] ?? lever.defaultValue ?? 0);
+            const bounded = Math.max(Number(lever.min), Math.min(Number(lever.max), current));
+            const weight = Number.isFinite(Number(lever.weight)) ? Number(lever.weight) : 1;
+            return acc * (1 + (bounded / 100) * weight);
+        }, 1);
+
+        for (let i = 0; i < nextValues.length; i += 1) {
+            nextValues[i] = Number((Number(nextValues[i]) * multiplier).toFixed(2));
+        }
+
+        const delta = nextValues.length > 1 ? nextValues[nextValues.length - 1] - nextValues[0] : 0;
+        const improving = getMetricDirection(row.key) === 'higher'
+            ? nextValues[nextValues.length - 1] >= nextValues[0]
+            : nextValues[nextValues.length - 1] <= nextValues[0];
+
+        return {
+            ...row,
+            values: nextValues,
+            quarterly: aggregateQuarterly(nextValues),
+            delta,
+            improving
+        };
+    });
+};
+
+const isLikelyMetricSeriesLine = (text = '') => {
+    const line = String(text || '').trim();
+    if (!line) return false;
+    const hasMetricWord = /(revenue|profit|margin|cost|churn|ratio|spend|kpi|metric|trend|active user|cac|ltv|retention)/i.test(line);
+    const numbers = line.match(/-?\d+(?:\.\d+)?/g) || [];
+    const hasSeriesSeparator = /[:,]/.test(line);
+    return hasMetricWord && numbers.length >= 3 && hasSeriesSeparator;
+};
+
 // ─── Main Component ────────────────────────────────────────────────────────
 const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
     const { inviteId, caseStudyId } = useParams();
@@ -407,6 +519,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
     const [loading, setLoading] = useState(true);
     const [session, setSession] = useState(null);
     const [caseStudy, setCaseStudy] = useState(null);
+    const [briefSections, setBriefSections] = useState([]);
     const [sectionPayloads, setSectionPayloads] = useState({});
     const [sectionLoadingKey, setSectionLoadingKey] = useState('');
     const [sectionError, setSectionError] = useState('');
@@ -422,12 +535,15 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
     const [coachNote, setCoachNote] = useState('Answer with data-backed reasoning. Reference specific metrics from the case document.');
     const [error, setError] = useState(null);
     const [metricViewMode, setMetricViewMode] = useState('case');
-    const [activeCaseSection, setActiveCaseSection] = useState('snapshot');
+    const [activeCaseSection, setActiveCaseSection] = useState('overview');
     const [theme, setTheme] = useState(getInitialTheme);
     const [leftWidth, setLeftWidth] = useState(() => window.innerWidth <= 1280 ? 280 : 300);
     const [rightWidth, setRightWidth] = useState(() => window.innerWidth <= 1280 ? 340 : 370);
     const [questionTracker, setQuestionTracker] = useState([]);
     const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
+    const [simulationValues, setSimulationValues] = useState({});
+    const [simulationRows, setSimulationRows] = useState([]);
+    const [simulationRunsByQuestionId, setSimulationRunsByQuestionId] = useState({});
     const chatEndRef = useRef(null);
     const dashboardPath = userRole === 'admin' ? '/admin/dashboard' : '/candidate/dashboard';
 
@@ -489,10 +605,11 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
     const applySessionData = (sess, cs) => {
         setSession(sess);
         setCaseStudy(cs);
+        setBriefSections([]);
         setSectionPayloads({});
         setSectionLoadingKey('');
         setSectionError('');
-        setActiveCaseSection('snapshot');
+        setActiveCaseSection('overview');
         const history = Array.isArray(sess.chat_history) && sess.chat_history.length > 0
             ? sess.chat_history
             : [{ role: 'assistant', content: cs.initial_prompt }];
@@ -526,6 +643,28 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
         }
         setLoading(false);
     };
+
+    useEffect(() => {
+        if (!caseStudy?.id) {
+            setBriefSections([]);
+            return;
+        }
+
+        let cancelled = false;
+        const fetchBriefSections = async () => {
+            try {
+                const res = await axios.get(`${API_BASE}/case-studies/${caseStudy.id}/brief`);
+                const dbSections = Array.isArray(res.data?.brief?.sections) ? res.data.brief.sections : [];
+                if (cancelled) return;
+                setBriefSections(dbSections);
+            } catch {
+                if (!cancelled) setBriefSections([]);
+            }
+        };
+
+        fetchBriefSections();
+        return () => { cancelled = true; };
+    }, [caseStudy?.id]);
 
     const validateAndStart = async () => {
         setLoading(true); setError(null);
@@ -817,17 +956,98 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
         };
     }, [latestCandidateAnswer, metricRows, dynamicMetricRows, cockpitMetrics, hasCandidateProgress]);
 
-    const displayedRows = metricViewMode === 'case' ? metricRows : dynamicMetricRows;
-    const displayedKpis = metricViewMode === 'case' ? staticKpis : (hasCandidateProgress ? cockpitMetrics : staticKpis);
+    const mockDrillEnabled = useMemo(() => normalizeMockDrillMode(caseStudy || {}), [caseStudy]);
+    const mockDrillLevers = useMemo(() => resolveMockDrillLevers(caseStudy || {}), [caseStudy]);
 
-    const caseSections = useMemo(() => ([
-        { key: 'snapshot', label: 'Overview' },
-        { key: 'data', label: 'Data & Metrics' },
-        { key: 'problem', label: 'Problem Statement' },
-        { key: 'objectives', label: 'Objectives' },
-        { key: 'events', label: 'Events & Context' },
-        { key: 'insights', label: 'Key Insights' }
-    ]), []);
+    useEffect(() => {
+        if (!mockDrillEnabled) {
+            setSimulationValues({});
+            setSimulationRows([]);
+            setSimulationRunsByQuestionId({});
+            return;
+        }
+
+        const nextValues = {};
+        for (const lever of mockDrillLevers) {
+            nextValues[lever.id] = Number(lever.defaultValue || 0);
+        }
+        setSimulationValues(nextValues);
+        setSimulationRows([]);
+        setSimulationRunsByQuestionId({});
+    }, [mockDrillEnabled, mockDrillLevers]);
+
+    const activeQuestionSimulationKey = activeQuestion?.id || 'global';
+    const hasSimulationRunForActiveQuestion = Boolean(simulationRunsByQuestionId?.[activeQuestionSimulationKey]);
+
+    const simulationPreviewRows = useMemo(() => {
+        if (!mockDrillEnabled) return [];
+        return applyMockDrillToMetricRows(metricRows, mockDrillLevers, simulationValues);
+    }, [mockDrillEnabled, metricRows, mockDrillLevers, simulationValues]);
+
+    const simulationDisplayRows = simulationRows.length > 0 ? simulationRows : simulationPreviewRows;
+
+    const simulationTimelineLabels = useMemo(() => {
+        const seriesLen = Math.max(...simulationDisplayRows.map((row) => row.values.length), 0);
+        if (seriesLen <= 0) return [];
+        if (seriesLen <= 12) return monthNames.slice(0, seriesLen);
+        return Array.from({ length: seriesLen }, (_, i) => `P${i + 1}`);
+    }, [simulationDisplayRows]);
+
+    const simulationKpis = useMemo(() => simulationDisplayRows.slice(0, 8).map((row) => ({
+        key: row.key,
+        label: row.label,
+        current: row.values[row.values.length - 1] || 0,
+        delta: row.delta,
+        deltaPct: row.values.length > 1 && row.values[0] !== 0 ? ((row.values[row.values.length - 1] - row.values[0]) / Math.abs(row.values[0])) * 100 : 0,
+        isImproving: row.improving,
+        touched: false
+    })), [simulationDisplayRows]);
+
+    const simulationLeversByGroup = useMemo(() => {
+        return Object.entries(mockDrillLevers.reduce((acc, lever) => {
+            const group = lever.group || 'Strategy';
+            if (!acc[group]) acc[group] = [];
+            acc[group].push(lever);
+            return acc;
+        }, {}));
+    }, [mockDrillLevers]);
+
+    const runSimulationForActiveQuestion = () => {
+        const nextRows = applyMockDrillToMetricRows(metricRows, mockDrillLevers, simulationValues);
+        setSimulationRows(nextRows);
+        setSimulationRunsByQuestionId((prev) => ({ ...prev, [activeQuestionSimulationKey]: true }));
+        setCoachNote('Simulation executed. Use these impact signals in your answer.');
+    };
+
+    const caseSections = useMemo(() => {
+        const deduped = [];
+        const seen = new Set();
+
+        const push = (section) => {
+            const key = String(section?.key || '').trim();
+            const label = String(section?.label || '').trim();
+            if (!key || !label) return;
+            const dedupeKey = `${label.toLowerCase()}::${key}`;
+            if (seen.has(dedupeKey)) return;
+            seen.add(dedupeKey);
+            deduped.push({ key, label, role: String(section?.role || 'other') });
+        };
+
+        if (Array.isArray(briefSections) && briefSections.length > 0) {
+            briefSections.forEach(push);
+            return deduped;
+        }
+
+        const rawSections = getParsedSectionsFromCase(caseStudy);
+        const llmSections = Array.isArray(rawSections?._sections) ? rawSections._sections : [];
+        llmSections.forEach((s, idx) => {
+            const content = String(s?.content || '').trim();
+            if (!content) return;
+            push({ key: `section_${idx}`, label: String(s?.heading || `Section ${idx + 1}`), role: String(s?.role || 'other') });
+        });
+
+        return deduped;
+    }, [briefSections, caseStudy]);
 
     const handleSectionSelect = (sectionKey) => {
         setActiveCaseSection(sectionKey);
@@ -835,27 +1055,47 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
     };
 
     useEffect(() => {
-        if (!caseStudy?.id || !activeCaseSection || activeCaseSection === 'data') return;
-        if (sectionPayloads[activeCaseSection] || sectionLoadingKey === activeCaseSection) return;
+        if (!['overview', 'data', 'simulation'].includes(activeCaseSection)) {
+            setActiveCaseSection('overview');
+        }
+    }, [activeCaseSection]);
 
-        const fetchActiveSection = async () => {
-            setSectionLoadingKey(activeCaseSection);
+    useEffect(() => {
+        if (!caseStudy?.id || !Array.isArray(caseSections) || caseSections.length === 0) return;
+
+        const targets = caseSections
+            .map((s) => String(s?.key || '').trim())
+            .filter((k) => k.length > 0 && !sectionPayloads[k]);
+
+        if (targets.length === 0) return;
+
+        let cancelled = false;
+        const fetchAllSections = async () => {
+            setSectionLoadingKey('overview_all');
+            setSectionError('');
             try {
-                const res = await axios.get(`${API_BASE}/case-studies/${caseStudy.id}/brief-section/${activeCaseSection}`);
-                if (res.data?.success && res.data?.section) {
-                    setSectionPayloads((prev) => ({ ...prev, [activeCaseSection]: res.data.section }));
-                } else {
-                    setSectionError('Failed to load section content.');
+                const results = await Promise.all(targets.map(async (key) => {
+                    const res = await axios.get(`${API_BASE}/case-studies/${caseStudy.id}/brief-section/${key}`);
+                    return { key, section: res.data?.section || null, success: Boolean(res.data?.success && res.data?.section) };
+                }));
+
+                if (cancelled) return;
+
+                const nextPayloads = {};
+                for (const item of results) {
+                    if (item.success) nextPayloads[item.key] = item.section;
                 }
+                setSectionPayloads((prev) => ({ ...prev, ...nextPayloads }));
             } catch (err) {
-                setSectionError(err.response?.data?.error || 'Failed to load section content.');
+                if (!cancelled) setSectionError(err.response?.data?.error || 'Failed to load section content.');
             } finally {
-                setSectionLoadingKey('');
+                if (!cancelled) setSectionLoadingKey('');
             }
         };
 
-        fetchActiveSection();
-    }, [activeCaseSection, caseStudy?.id, sectionPayloads, sectionLoadingKey]);
+        fetchAllSections();
+        return () => { cancelled = true; };
+    }, [caseStudy?.id, caseSections, sectionPayloads]);
 
     // ── Loading / Error screens ──────────────────────────────────────────────
     if (loading) return (
@@ -895,18 +1135,29 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                     <p className="case-industry">Navigate the full brief before responding</p>
                 </div>
 
-                <SidebarCard label="Section Navigator" variant="accent">
-                    <nav className="sidebar-section-nav" aria-label="Case study sections">
-                        {caseSections.map((section) => (
+                <SidebarCard label="Case Flow" variant="accent">
+                    <div className="sidebar-section-nav" aria-label="Candidate case flow">
+                        <button
+                            className={`sidebar-section-btn ${activeCaseSection === 'overview' ? 'active' : ''}`}
+                            onClick={() => handleSectionSelect('overview')}
+                        >
+                            Overview
+                        </button>
+                        <button
+                            className={`sidebar-section-btn ${activeCaseSection === 'data' ? 'active' : ''}`}
+                            onClick={() => handleSectionSelect('data')}
+                        >
+                            Data & Metrics
+                        </button>
+                        {mockDrillEnabled && (
                             <button
-                                key={section.key}
-                                className={`sidebar-section-btn ${activeCaseSection === section.key ? 'active' : ''}`}
-                                onClick={() => handleSectionSelect(section.key)}
+                                className={`sidebar-section-btn sidebar-section-btn--mock-drill ${activeCaseSection === 'simulation' ? 'active' : ''}`}
+                                onClick={() => setActiveCaseSection('simulation')}
                             >
-                                {section.label}
+                                Run Simulations
                             </button>
-                        ))}
-                    </nav>
+                        )}
+                    </div>
                 </SidebarCard>
 
                 <SidebarCard label="Question Tracker" variant="accent">
@@ -963,184 +1214,68 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                     </div>
                 </header>
 
-                {activeCaseSection === 'data' && (
-                    <>
-                        <section className="metric-tabs" aria-label="Metric data view switcher">
-                            <button
-                                className={`metric-tab ${metricViewMode === 'case' ? 'active' : ''}`}
-                                onClick={() => setMetricViewMode('case')}
-                            >
-                                Actual Case Study Data
-                            </button>
-                            <button
-                                className={`metric-tab ${metricViewMode === 'dynamic' ? 'active' : ''}`}
-                                onClick={() => setMetricViewMode('dynamic')}
-                            >
-                                Candidate-Driven Dynamic View
-                            </button>
-                        </section>
-
-                        {!hasCandidateProgress && metricViewMode === 'dynamic' && (
-                            <p className="hint-line">Dynamic simulation activates after your first answer. Until then, both views show the same baseline metrics.</p>
+                {activeCaseSection === 'overview' && (
+                <section className="case-content-pane" aria-label="Overview content">
+                    <article className="main-section-card">
+                        <h3>Overview</h3>
+                        {sectionLoadingKey === 'overview_all' && (
+                            <p>Loading overview sections...</p>
                         )}
-
-                        <section className="kpi-rail" aria-label="Executive KPI rail">
-                            {displayedKpis.slice(0, 8).map((metric) => (
-                                <article key={metric.key} className={`kpi-tile ${metric.isImproving ? 'up' : 'down'} ${metric.touched ? 'touched' : ''}`}>
-                                    <p className="kpi-tile__name">{metric.label}</p>
-                                    <p className="kpi-tile__value">{formatMetricValue(metric.current, inferMetricUnit(metric.key, [metric.current]))}</p>
-                                    <p className={`kpi-tile__delta ${metric.delta >= 0 ? 'positive' : 'negative'}`}>
-                                        {metric.delta >= 0 ? '+' : ''}{metric.delta.toFixed(2)} ({metric.deltaPct >= 0 ? '+' : ''}{metric.deltaPct.toFixed(1)}%)
-                                    </p>
-                                </article>
-                            ))}
-                        </section>
-                    </>
-                )}
-
-                {activeCaseSection !== 'data' && (
-                <section className="case-content-pane" aria-label="Selected case section content">
-                    {!activeCaseSection && (
-                        <article className="main-section-card">
-                            <h3>Select A Section</h3>
-                            <p>Choose a section from the left navigator to fetch and view its content.</p>
-                        </article>
-                    )}
-
-                    {!!activeCaseSection && sectionLoadingKey === activeCaseSection && !sectionPayloads[activeCaseSection] && (
-                        <article className="main-section-card">
-                            <h3>Loading Section</h3>
-                            <p>Fetching latest content from backend...</p>
-                        </article>
-                    )}
-
-                    {!!activeCaseSection && sectionError && (
-                        <article className="main-section-card">
-                            <h3>Section Load Failed</h3>
+                        {sectionError && (
                             <p>{sectionError}</p>
-                        </article>
-                    )}
-
-                    {!!activeCaseSection && !sectionError && sectionPayloads[activeCaseSection] && (
-                    <article key={activeCaseSection} className="main-section-card">
-                        {activeCaseSection === 'snapshot' && (
-                            <>
-                                <h3>Case Overview</h3>
-                                <p>{sectionPayloads.snapshot?.headline || 'Case summary unavailable.'}</p>
-
-                                {(sectionPayloads.snapshot?.contextLines || []).length > 0 && (
-                                    <>
-                                        <h4 className="brief-subheading">Case Context</h4>
-                                        <ul>
-                                            {(sectionPayloads.snapshot?.contextLines || []).map((line, idx) => <li key={`ctx-${idx}`}>{line}</li>)}
-                                        </ul>
-                                    </>
-                                )}
-
-                                <h4 className="brief-subheading">Diagnostic Summary</h4>
-                                <ul>
-                                    {(sectionPayloads.snapshot?.diagnosticSummary || []).map((line, idx) => <li key={`diag-${idx}`}>{line}</li>)}
-                                </ul>
-
-                                {(sectionPayloads.snapshot?.pressureSignals || []).length > 0 && (
-                                    <>
-                                        <h4 className="brief-subheading">Pressure Signals</h4>
-                                        <ul>
-                                            {(sectionPayloads.snapshot?.pressureSignals || []).map((item, idx) => <li key={`pain-${idx}`}>{item}</li>)}
-                                        </ul>
-                                    </>
-                                )}
-
-                                {(sectionPayloads.snapshot?.positiveSignals || []).length > 0 && (
-                                    <>
-                                        <h4 className="brief-subheading">Positive Signals</h4>
-                                        <ul>
-                                            {(sectionPayloads.snapshot?.positiveSignals || []).map((item, idx) => <li key={`str-${idx}`}>{item}</li>)}
-                                        </ul>
-                                    </>
-                                )}
-
-                                {(sectionPayloads.snapshot?.businessEvents || []).length > 0 && (
-                                    <>
-                                        <h4 className="brief-subheading">Business Events to Factor</h4>
-                                        <ul>
-                                            {(sectionPayloads.snapshot?.businessEvents || []).map((item, idx) => <li key={`evt-${idx}`}>{item}</li>)}
-                                        </ul>
-                                    </>
-                                )}
-
-                                {(sectionPayloads.snapshot?.coreQuestions || []).length > 0 && (
-                                    <>
-                                        <h4 className="brief-subheading">Core Questions</h4>
-                                        <ol>
-                                            {(sectionPayloads.snapshot?.coreQuestions || []).map((item, idx) => <li key={`q-${idx}`}>{item}</li>)}
-                                        </ol>
-                                    </>
-                                )}
-
-                                {(sectionPayloads.snapshot?.expectedOutputs || []).length > 0 && (
-                                    <>
-                                        <h4 className="brief-subheading">Expected Outputs</h4>
-                                        <ul>
-                                            {(sectionPayloads.snapshot?.expectedOutputs || []).map((item, idx) => <li key={`out-${idx}`}>{item}</li>)}
-                                        </ul>
-                                    </>
-                                )}
-                            </>
                         )}
 
-                        {activeCaseSection === 'problem' && (
-                            <>
-                                <h3>Problem Statement</h3>
-                                {(sectionPayloads.problem?.introLines || []).slice(0, 2).map((l, i) => <p key={i}>{l}</p>)}
-                                <ol>
-                                    {(sectionPayloads.problem?.questions || []).slice(0, 6).map((q, i) => (
-                                        <li key={i}>{q}</li>
+                        {!sectionError && caseSections.length === 0 && (
+                            <p>No overview sections were found for this case study.</p>
+                        )}
+
+                        {!sectionError && caseSections.length > 0 && caseSections.map((section) => {
+                            const payload = sectionPayloads[section.key] || {};
+                            const title = String(payload.title || payload.heading || section.label || 'Section').trim();
+                            const content = String(payload.content || '').trim();
+                            const bullets = Array.isArray(payload.bullets)
+                                ? payload.bullets.map((b) => String(b || '').trim()).filter(Boolean)
+                                : [];
+                            const paragraphs = content
+                                ? content.split(/\n{2,}/).map((p) => String(p || '').trim()).filter(Boolean)
+                                : [];
+
+                            if (!title && paragraphs.length === 0 && bullets.length === 0) return null;
+
+                            return (
+                                <section key={section.key} style={{ marginBottom: '14px' }}>
+                                    <h4 className="brief-subheading" style={{ marginTop: 0 }}>{title}</h4>
+                                    {paragraphs.length > 0 && paragraphs.map((p, idx) => (
+                                        <p key={`${section.key}-p-${idx}`} style={{ whiteSpace: 'pre-wrap' }}>{p}</p>
                                     ))}
-                                </ol>
-                            </>
-                        )}
-
-                        {activeCaseSection === 'objectives' && (
-                            <>
-                                <h3>Objectives and Deliverables</h3>
-                                <ul>
-                                    {(sectionPayloads.objectives?.objectives || ['Identify root causes', 'Build six-month action plan', 'Highlight risks']).map((line, i) => (
-                                        <li key={i}>{line}</li>
-                                    ))}
-                                </ul>
-                                <p className="hint-line">Coverage: {questionCoverage}% · Metric focus: {liveFocusRatio}% · Attempts left: {attemptsLeft}</p>
-                            </>
-                        )}
-
-                        {activeCaseSection === 'events' && (
-                            <>
-                                <h3>Business Events and Context</h3>
-                                <ul>
-                                    {(sectionPayloads.events?.events || []).slice(0, 8).map((ev, i) => (
-                                        <li key={i}>{ev}</li>
-                                    ))}
-                                </ul>
-                            </>
-                        )}
-
-                        {activeCaseSection === 'insights' && (
-                            <>
-                                <h3>Key Insights</h3>
-                                <ul>
-                                    {(sectionPayloads.insights?.insights || []).length > 0
-                                        ? sectionPayloads.insights.insights.slice(0, 10).map((ins, i) => <li key={i}>{ins}</li>)
-                                        : ['No extracted key insights yet. Use metrics below to form your hypothesis.'].map((ins, i) => <li key={i}>{ins}</li>)}
-                                </ul>
-                            </>
-                        )}
+                                    {bullets.length > 0 && (
+                                        <ul>
+                                            {bullets.map((item, idx) => <li key={`${section.key}-b-${idx}`}>{item}</li>)}
+                                        </ul>
+                                    )}
+                                </section>
+                            );
+                        })}
                     </article>
-                    )}
                 </section>
                 )}
 
                 {activeCaseSection === 'data' && (
-                    <>
+                <section className="kpi-rail" aria-label="Executive KPI rail">
+                    {staticKpis.slice(0, 8).map((metric) => (
+                        <article key={metric.key} className={`kpi-tile ${metric.isImproving ? 'up' : 'down'}`}>
+                            <p className="kpi-tile__name">{metric.label}</p>
+                            <p className="kpi-tile__value">{formatMetricValue(metric.current, inferMetricUnit(metric.key, [metric.current]))}</p>
+                            <p className={`kpi-tile__delta ${metric.delta >= 0 ? 'positive' : 'negative'}`}>
+                                {metric.delta >= 0 ? '+' : ''}{metric.delta.toFixed(2)} ({metric.deltaPct >= 0 ? '+' : ''}{metric.deltaPct.toFixed(1)}%)
+                            </p>
+                        </article>
+                    ))}
+                </section>
+                )}
+
+                {activeCaseSection === 'data' && (
+                <>
                 <section className="metrics-deep-dive">
                     <div className="table-card">
                         <div className="table-card__header">
@@ -1158,7 +1293,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {displayedRows.map((row) => (
+                                    {metricRows.map((row) => (
                                         <tr key={row.key}>
                                             <td className="sticky-col">{row.label}</td>
                                             <td>{row.unit.replace('_', ' ')}</td>
@@ -1166,6 +1301,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                                             <td className={row.improving ? 'trend-positive' : 'trend-negative'}>{row.improving ? 'Improving' : 'Deteriorating'}</td>
                                         </tr>
                                     ))}
+                
                                 </tbody>
                             </table>
                         </div>
@@ -1187,7 +1323,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {displayedRows.map((row) => (
+                                    {metricRows.map((row) => (
                                         <tr key={`${row.key}-q`}>
                                             <td className="sticky-col">{row.label}</td>
                                             <td>{row.quarterly[0] !== undefined ? formatMetricValue(row.quarterly[0], row.unit) : '—'}</td>
@@ -1203,7 +1339,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
 
                 {chartSeries.length > 0 && (
                     <section className="trend-strip">
-                        {displayedRows.slice(0, 5).map((row) => (
+                        {metricRows.slice(0, 5).map((row) => (
                             <MetricLineChart
                                 key={row.key}
                                 label={row.label}
@@ -1214,6 +1350,179 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                         ))}
                     </section>
                 )}
+                </>
+                )}
+
+                {activeCaseSection === 'simulation' && mockDrillEnabled && (
+                    <>
+                        <section className="simulation-hero" aria-label="Run simulations workspace">
+                            <div>
+                                <p className="simulation-hero__eyebrow">Interactive Scenario Lab</p>
+                                <h3>Run Simulations</h3>
+                                <p className="simulation-hero__desc">This simulation is dynamic and uses only the metrics available in this case study. Adjust levers and execute to see updated KPI, tables, and trends.</p>
+                            </div>
+                            <div className="simulation-hero__status-wrap">
+                                <div className={`simulation-status-pill ${hasSimulationRunForActiveQuestion ? 'ready' : 'pending'}`}>
+                                    {hasSimulationRunForActiveQuestion ? 'Simulation Executed' : 'Simulation Pending'}
+                                </div>
+                                <button className="theme-switch" onClick={() => setActiveCaseSection('data')}>
+                                    Back To Data & Metrics
+                                </button>
+                            </div>
+                        </section>
+
+                        <section className="metrics-deep-dive">
+                            <div className="table-card">
+                                <div className="table-card__header">
+                                    <h3>Simulation Controls</h3>
+                                    <p>Configure levers and run impact simulation for this case.</p>
+                                </div>
+                                <div className="simulation-controls-grid">
+                                    {simulationLeversByGroup.length === 0 && (
+                                        <div className="simulation-empty-card">
+                                            <h4>No simulation levers available</h4>
+                                            <p>This case has no simulation controls configured.</p>
+                                        </div>
+                                    )}
+
+                                    {simulationLeversByGroup.map(([group, levers]) => (
+                                        <div key={group} className="simulation-group-card">
+                                            <div className="simulation-group-title">{group}</div>
+                                            <div className="simulation-group-levers">
+                                                {levers.map((lever) => (
+                                                    <label key={lever.id} className="simulation-lever-row">
+                                                        <div className="simulation-lever-header">
+                                                            <span>{lever.label}</span>
+                                                            <span>{Number(simulationValues[lever.id] ?? lever.defaultValue ?? 0)}%</span>
+                                                        </div>
+                                                        <input
+                                                            type="range"
+                                                            min={lever.min}
+                                                            max={lever.max}
+                                                            step={lever.step}
+                                                            value={Number(simulationValues[lever.id] ?? lever.defaultValue ?? 0)}
+                                                            onChange={(event) => {
+                                                                const v = Number(event.target.value);
+                                                                setSimulationValues((prev) => ({ ...prev, [lever.id]: v }));
+                                                            }}
+                                                        />
+                                                    </label>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    ))}
+
+                                    <div className="simulation-controls-actions">
+                                        <button className="theme-switch" onClick={() => {
+                                            const resetValues = {};
+                                            for (const lever of mockDrillLevers) resetValues[lever.id] = Number(lever.defaultValue || 0);
+                                            setSimulationValues(resetValues);
+                                            setSimulationRows([]);
+                                            setSimulationRunsByQuestionId((prev) => ({ ...prev, [activeQuestionSimulationKey]: false }));
+                                        }}>
+                                            Reset
+                                        </button>
+                                        <button className="btn-primary" onClick={runSimulationForActiveQuestion} disabled={simulationLeversByGroup.length === 0}>
+                                            Execute Simulation
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="table-card">
+                                <div className="table-card__header">
+                                    <h3>Simulation KPI Rail</h3>
+                                    <p>Live KPI impact from current simulation parameters.</p>
+                                </div>
+                                <div className="simulation-impact-wrap">
+                                    <section className="kpi-rail" aria-label="Simulation KPI rail">
+                                        {simulationKpis.map((metric) => (
+                                            <article key={metric.key} className={`kpi-tile ${metric.isImproving ? 'up' : 'down'}`}>
+                                                <p className="kpi-tile__name">{metric.label}</p>
+                                                <p className="kpi-tile__value">{formatMetricValue(metric.current, inferMetricUnit(metric.key, [metric.current]))}</p>
+                                                <p className={`kpi-tile__delta ${metric.delta >= 0 ? 'positive' : 'negative'}`}>
+                                                    {metric.delta >= 0 ? '+' : ''}{metric.delta.toFixed(2)} ({metric.deltaPct >= 0 ? '+' : ''}{metric.deltaPct.toFixed(1)}%)
+                                                </p>
+                                            </article>
+                                        ))}
+                                    </section>
+                                </div>
+                            </div>
+                        </section>
+
+                        <section className="metrics-deep-dive">
+                            <div className="table-card">
+                                <div className="table-card__header">
+                                    <h3>Simulated Monthly Metrics</h3>
+                                    <p>Case-specific dynamic series after simulation execution.</p>
+                                </div>
+                                <div className="metrics-table-wrap">
+                                    <table className="metrics-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Parameter</th>
+                                                <th>Unit</th>
+                                                {simulationTimelineLabels.map((label) => <th key={label}>{label}</th>)}
+                                                <th>Trend</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {simulationDisplayRows.map((row) => (
+                                                <tr key={row.key}>
+                                                    <td className="sticky-col">{row.label}</td>
+                                                    <td>{row.unit.replace('_', ' ')}</td>
+                                                    {row.values.map((val, idx) => <td key={`${row.key}-${idx}`}>{formatMetricValue(val, row.unit)}</td>)}
+                                                    <td className={row.improving ? 'trend-positive' : 'trend-negative'}>{row.improving ? 'Improving' : 'Deteriorating'}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            <div className="table-card">
+                                <div className="table-card__header">
+                                    <h3>Simulated Quarterly Rollup</h3>
+                                    <p>Quarterly summary based on this case's metric structure.</p>
+                                </div>
+                                <div className="metrics-table-wrap">
+                                    <table className="metrics-table quarterly-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Parameter</th>
+                                                <th>Q1</th>
+                                                <th>Q2</th>
+                                                <th>Direction</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {simulationDisplayRows.map((row) => (
+                                                <tr key={`${row.key}-q`}>
+                                                    <td className="sticky-col">{row.label}</td>
+                                                    <td>{row.quarterly[0] !== undefined ? formatMetricValue(row.quarterly[0], row.unit) : '—'}</td>
+                                                    <td>{row.quarterly[1] !== undefined ? formatMetricValue(row.quarterly[1], row.unit) : '—'}</td>
+                                                    <td>{getMetricDirection(row.key) === 'higher' ? 'Higher is better' : 'Lower is better'}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </section>
+
+                        {simulationDisplayRows.length > 0 && (
+                            <section className="trend-strip">
+                                {simulationDisplayRows.slice(0, 5).map((row) => (
+                                    <MetricLineChart
+                                        key={row.key}
+                                        label={row.label}
+                                        values={row.values}
+                                        xLabels={simulationTimelineLabels}
+                                        unit={row.unit}
+                                    />
+                                ))}
+                            </section>
+                        )}
                     </>
                 )}
             </main>
@@ -1272,30 +1581,6 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                         </div>
                     )}
 
-                    {decisionImpact && (
-                        <div className="decision-impact-box">
-                            <p className="decision-impact-title">{decisionImpact.title || 'Metric Overview'}</p>
-                            {decisionImpact.improved.length > 0 && (
-                                <div>
-                                    <p className="impact-sub impact-sub--good">Improved Signals</p>
-                                    <ul>
-                                        {decisionImpact.improved.map((item, idx) => <li key={`imp-${idx}`}>{item}</li>)}
-                                    </ul>
-                                </div>
-                            )}
-                            {decisionImpact.worsened.length > 0 && (
-                                <div>
-                                    <p className="impact-sub impact-sub--bad">Worsened Signals</p>
-                                    <ul>
-                                        {decisionImpact.worsened.map((item, idx) => <li key={`wrs-${idx}`}>{item}</li>)}
-                                    </ul>
-                                </div>
-                            )}
-                            {!decisionImpact.isBaseline && decisionImpact.missed.length > 0 && (
-                                <p className="impact-missed">Missed metrics: {decisionImpact.missed.join(', ')}</p>
-                            )}
-                        </div>
-                    )}
                 </header>
 
                 <div className="messages-container">

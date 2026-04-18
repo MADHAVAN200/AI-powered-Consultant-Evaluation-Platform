@@ -86,6 +86,56 @@ const buildMetricsEditorText = (rows = []) => rows
     .map((row) => `${row.key}: ${row.values.map((v) => Number(v)).join(', ')}`)
     .join('\n');
 
+const parseSimulationConfigText = (text = '', metricRows = []) => {
+    const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+    const parsedLevers = [];
+
+    for (const line of lines) {
+        // Format: group|label|metric_key|min|max|step|default
+        const parts = line.split('|').map((p) => p.trim());
+        if (parts.length < 7) continue;
+        const [group, label, metricKeyRaw, minRaw, maxRaw, stepRaw, defaultRaw] = parts;
+        const metricKey = toSectionKey(metricKeyRaw);
+        const min = Number(minRaw);
+        const max = Number(maxRaw);
+        const step = Number(stepRaw);
+        const defaultValue = Number(defaultRaw);
+        if (!group || !label || !metricKey) continue;
+        if (![min, max, step, defaultValue].every(Number.isFinite)) continue;
+        if (max <= min || step <= 0) continue;
+
+        parsedLevers.push({
+            id: `${metricKey}_${parsedLevers.length + 1}`,
+            group,
+            label,
+            metricKey,
+            min,
+            max,
+            step,
+            defaultValue,
+            weight: 1
+        });
+    }
+
+    if (parsedLevers.length > 0) return parsedLevers;
+
+    return metricRows.slice(0, 8).map((row, idx) => ({
+        id: `${row.key}_${idx + 1}`,
+        group: (/revenue|profit|margin|cost|cash|ebitda/.test(row.key) ? 'Financial' : /churn|customer|nps|cac|ltv|conversion/.test(row.key) ? 'Market' : /delay|delivery|ops|inventory|utilization/.test(row.key) ? 'Operations' : 'Strategy'),
+        label: `${row.label} Lever`,
+        metricKey: row.key,
+        min: -30,
+        max: 30,
+        step: 5,
+        defaultValue: 0,
+        weight: 1
+    }));
+};
+
+const serializeSimulationConfig = (levers = []) => (levers || [])
+    .map((l) => `${l.group}|${l.label}|${l.metricKey}|${l.min}|${l.max}|${l.step}|${l.defaultValue}`)
+    .join('\n');
+
 const parseMetricsEditorText = (text = '') => {
     const parsed = [];
     const lines = String(text || '').split('\n');
@@ -374,6 +424,8 @@ const AdminEvaluation = () => {
     const [editingCaseId, setEditingCaseId] = useState(null);
     const [metricsEditorText, setMetricsEditorText] = useState('');
     const [metricsEditorSectionId, setMetricsEditorSectionId] = useState('');
+    const [assessmentMode, setAssessmentMode] = useState('chat_only');
+    const [simulationConfigText, setSimulationConfigText] = useState('');
 
     const fetchCaseStudies = async () => {
         try {
@@ -424,6 +476,12 @@ const AdminEvaluation = () => {
                 const draftSections = buildSectionsFromDraft(draft);
                 setSections(draftSections);
                 setActiveSectionId(draftSections[0]?.id || 'overview');
+
+                const savedMode = String(draft?.parsedSections?._caseMode || 'chat_only').toLowerCase();
+                const normalizedMode = savedMode === 'mock_drill_chat' ? 'mock_drill_chat' : 'chat_only';
+                setAssessmentMode(normalizedMode);
+                const savedLevers = Array.isArray(draft?.parsedSections?._mockDrill?.levers) ? draft.parsedSections._mockDrill.levers : [];
+                setSimulationConfigText(serializeSimulationConfig(savedLevers));
             }
         } catch (err) {
             setSaveError(err.response?.data?.error || 'Failed to import PDF.');
@@ -661,6 +719,12 @@ const AdminEvaluation = () => {
                 const draftSections = buildSectionsFromDraft(draft);
                 setSections(draftSections);
                 setActiveSectionId(draftSections[0]?.id || 'overview');
+
+                const savedMode = String(draft?.parsedSections?._caseMode || 'chat_only').toLowerCase();
+                const normalizedMode = savedMode === 'mock_drill_chat' ? 'mock_drill_chat' : 'chat_only';
+                setAssessmentMode(normalizedMode);
+                const savedLevers = Array.isArray(draft?.parsedSections?._mockDrill?.levers) ? draft.parsedSections._mockDrill.levers : [];
+                setSimulationConfigText(serializeSimulationConfig(savedLevers));
             }
         } catch (err) {
             setSaveError(err.response?.data?.error || err.message || 'Failed to fetch case study details.');
@@ -754,6 +818,11 @@ const AdminEvaluation = () => {
             parsedSections._numericSeries = (pdfDraft.parsedSections && typeof pdfDraft.parsedSections._numericSeries === 'object')
                 ? pdfDraft.parsedSections._numericSeries
                 : {};
+            parsedSections._caseMode = assessmentMode;
+            parsedSections._mockDrill = {
+                enabled: assessmentMode === 'mock_drill_chat',
+                levers: parseSimulationConfigText(simulationConfigText, metricRows)
+            };
 
             const payload = {
                 title: caseTitle,
@@ -785,6 +854,8 @@ const AdminEvaluation = () => {
                 setCaseTitle('');
                 setCaseIndustry('');
                 setThresholdPassingScore(0.6);
+                setAssessmentMode('chat_only');
+                setSimulationConfigText('');
                 await fetchCaseStudies();
             }
         } catch (err) {
@@ -902,6 +973,22 @@ const AdminEvaluation = () => {
                                 placeholder="Industry"
                                 style={{ margin: 0, padding: '4px 8px', width: '300px', background: 'transparent' }}
                             />
+                            <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
+                                <button
+                                    type="button"
+                                    className={`metric-tab ${assessmentMode === 'chat_only' ? 'active' : ''}`}
+                                    onClick={() => setAssessmentMode('chat_only')}
+                                >
+                                    Standard Chat
+                                </button>
+                                <button
+                                    type="button"
+                                    className={`metric-tab ${assessmentMode === 'mock_drill_chat' ? 'active' : ''}`}
+                                    onClick={() => setAssessmentMode('mock_drill_chat')}
+                                >
+                                    Mock Drill + Chat
+                                </button>
+                            </div>
                         </div>
                         <div className="workspace-actions">
                             <button className="theme-toggle" onClick={toggleTheme}>
@@ -918,6 +1005,21 @@ const AdminEvaluation = () => {
 
                     {showMetricsPreview && (
                         <section className="case-content-pane" style={{ marginTop: '20px' }}>
+                            {assessmentMode === 'mock_drill_chat' && (
+                                <article className="main-section-card" style={{ marginBottom: '12px' }}>
+                                    <h3 style={{ marginBottom: '8px' }}>Mock Drill Config</h3>
+                                    <p className="hint-line" style={{ marginTop: 0, marginBottom: '8px' }}>
+                                        Define simulation levers as: group|label|metric_key|min|max|step|default
+                                    </p>
+                                    <textarea
+                                        style={{ width: '100%', minHeight: '130px', fontSize: '0.8rem', lineHeight: '1.5', background: 'var(--bg-subtle)', border: '1px dashed var(--border-default)', color: 'var(--text-primary)', padding: '12px', resize: 'vertical' }}
+                                        value={simulationConfigText}
+                                        onChange={(e) => setSimulationConfigText(e.target.value)}
+                                        placeholder={'Financial|Price Increase|total_revenue|-20|20|5|0\nOperations|Lead Time Compression|average_lead_time|-30|10|5|0'}
+                                    />
+                                </article>
+                            )}
+
                             {editedMetricRows.length > 0 ? (
                                 <>
                                     <article className="main-section-card" style={{ marginBottom: '12px' }}>
@@ -1099,6 +1201,12 @@ const AdminEvaluation = () => {
                                     ) : (
                                         <div style={{ color: 'var(--accent-warning)', fontSize: '0.8rem', fontStyle: 'italic' }}>⚠️ No explicit questions detected.</div>
                                     )}
+                                </div>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                    <div className="admin-label">Case Mode</div>
+                                    <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>
+                                        {assessmentMode === 'mock_drill_chat' ? 'Mock Drill + Chat (simulation required before answer)' : 'Standard Chat'}
+                                    </div>
                                 </div>
                             </div>
                             <div className="admin-actions" style={{ borderTop: '1px solid var(--border-default)', paddingTop: '16px', marginTop: 'auto' }}>
