@@ -302,6 +302,45 @@ const extractProblemStatement = (sections, fullText) => {
     return longLines[longLines.length - 1] || 'Identify the root cause of the primary business challenge and propose a structured, data-driven recovery plan.';
 };
 
+const extractProblemQuestionsFromText = (problemText = '', fallbackFullText = '') => {
+    const source = String(problemText || '').trim() || String(fallbackFullText || '').trim();
+    if (!source) return [];
+
+    const lineBased = [];
+    for (const raw of source.split('\n')) {
+        const line = String(raw || '').trim();
+        const m = line.match(/^(\d+)[).:]\s+(.{8,})$/);
+        if (!m) continue;
+        lineBased.push({ order: Number(m[1]), text: m[2].trim() });
+    }
+
+    if (lineBased.length >= 2) {
+        return lineBased
+            .sort((a, b) => a.order - b.order)
+            .map((q) => q.text)
+            .filter(Boolean);
+    }
+
+    // Handles inline forms like: "1) ... 2) ... 3) ..."
+    const flattened = source.replace(/\s+/g, ' ').trim();
+    const inlineMatches = [...flattened.matchAll(/(?:^|\s)(\d+)[).:]\s*(.+?)(?=(?:\s+\d+[).:]\s)|$)/g)];
+    const inlineQuestions = inlineMatches
+        .map((m) => ({ order: Number(m[1] || 0), text: String(m[2] || '').trim() }))
+        .filter((q) => q.order > 0 && q.text.length > 8)
+        .sort((a, b) => a.order - b.order)
+        .map((q) => q.text);
+
+    if (inlineQuestions.length >= 2) return inlineQuestions;
+
+    // Final fallback: detect numbered prompts in full text globally.
+    const globalMatches = [...String(fallbackFullText || '').matchAll(/(?:^|\n)\s*(\d+)[).:]\s+(.{8,})(?=\n|$)/g)];
+    return globalMatches
+        .map((m) => ({ order: Number(m[1] || 0), text: String(m[2] || '').trim() }))
+        .filter((q) => q.order > 0 && q.text.length > 8)
+        .sort((a, b) => a.order - b.order)
+        .map((q) => q.text);
+};
+
 const generateCaseDraftFromPdf = (pdfText, options = {}) => {
     const text = cleanPdfText(pdfText);
     const boldHeadings = Array.isArray(options.boldHeadings) ? options.boldHeadings : [];
@@ -324,12 +363,14 @@ const generateCaseDraftFromPdf = (pdfText, options = {}) => {
     const context = contextParts.length > 100 ? contextParts : text;
 
     const problemStatement = extractProblemStatement(sections, text);
-
-    const questionLines = problemStatement
-        .split('\n')
-        .filter((l) => l.trim().length > 0)
-        .slice(0, 3)
-        .join('\n');
+    const problemQuestions = extractProblemQuestionsFromText(problemStatement, text);
+    const questionLines = (problemQuestions.length > 0
+        ? problemQuestions.map((q, idx) => `${idx + 1}) ${q}`)
+        : problemStatement
+            .split('\n')
+            .filter((l) => l.trim().length > 0)
+            .slice(0, 3)
+    ).join('\n');
     const initialPrompt = `Welcome to your ${industry} case study: "${title}".\n\nHere is your problem to solve:\n\n${questionLines}\n\nPlease begin by sharing your initial diagnostic hypothesis — what do you believe are the top 2–3 root causes of the central business problem? Be specific and reference the data provided in the case.`;
 
     const financialData = {};
@@ -347,6 +388,7 @@ const generateCaseDraftFromPdf = (pdfText, options = {}) => {
         financialData,
         parsedSections: {
             ...sections,
+            _problemQuestions: problemQuestions,
             _numericSeries: numericSeries
         },
         rawContent: text
@@ -374,6 +416,17 @@ const deriveRubricFromText = (userMessage = '') => {
         solutionQuality: clamp(actionHits * 3 + (wordCount > 70 ? 4 : 0), 0, 25),
         crossQuestionConsistency: clamp(consistencyHits * 3, 0, 15)
     });
+};
+
+const normalizeQuestionContext = (activeQuestion) => {
+    if (!activeQuestion || typeof activeQuestion !== 'object') return null;
+    const text = normalizeWhitespace(activeQuestion.text || activeQuestion.question || '');
+    if (!text) return null;
+
+    const index = Math.max(0, Number(activeQuestion.index || 0));
+    const questionId = String(activeQuestion.id || `q-${index + 1}`);
+    const total = Math.max(index + 1, Number(activeQuestion.total || index + 1));
+    return { id: questionId, index, total, text };
 };
 
 const toScoreBand = (totalScore) => {
@@ -518,7 +571,7 @@ const retrieveCaseEvidence = ({ caseStudy, userMessage, history = [], topK = 8 }
     return chunks.slice(0, Math.min(topK, chunks.length));
 };
 
-const buildEvaluationPrompt = (session, currentStep, evidenceChunks = []) => {
+const buildEvaluationPrompt = (session, currentStep, evidenceChunks = [], activeQuestion = null) => {
     const cs = session.case_studies;
     const fullCaseDocument = cs.raw_content || cs.context || '';
     const financialSummary = cs.financial_data && Object.keys(cs.financial_data).length > 0
@@ -531,11 +584,17 @@ const buildEvaluationPrompt = (session, currentStep, evidenceChunks = []) => {
         ? evidenceChunks.map((c, i) => `[E${i + 1}] (${c.source}) ${c.text}`).join('\n\n')
         : '[E1] No retrieved chunks. Use only explicit case text below and ask for clarification when data is missing.';
 
+    const questionContext = normalizeQuestionContext(activeQuestion);
+    const activeQuestionBlock = questionContext
+        ? `ACTIVE PROBLEM STATEMENT FOCUS:\n- Question ${questionContext.index + 1} of ${questionContext.total}: ${questionContext.text}\n- Evaluate the candidate answer specifically against this question.\n- Your follow-up must be a counter-question that deepens THIS question (not a different one).`
+        : 'ACTIVE PROBLEM STATEMENT FOCUS:\n- No specific question focus provided. Evaluate normally.';
+
     return `You are a Senior Partner at a top-tier strategy consulting firm conducting a live case study interview.
 
 CASE TITLE: ${cs.title}
 INDUSTRY: ${cs.industry || 'General Business Strategy'}
 CURRENT INTERVIEW PHASE: ${currentStep}
+${activeQuestionBlock}
 
 GROUNDING MODE (STRICT):
 - You MUST ground all reasoning and follow-up questions in the EVIDENCE PACK.
@@ -601,7 +660,7 @@ const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
     const ragServiceUrl = String(process.env.PY_RAG_SERVICE_URL || '').trim();
     const ragDebugLogs = /^(1|true|yes|on)$/i.test(String(process.env.RAG_DEBUG_LOGS || '').trim());
 
-    const callPythonRagEvaluate = async ({ session, history, userMessage, currentStep }) => {
+    const callPythonRagEvaluate = async ({ session, history, userMessage, currentStep, activeQuestion = null }) => {
         if (!ragServiceUrl) return null;
         try {
             const res = await fetch(`${ragServiceUrl.replace(/\/$/, '')}/rag/evaluate`, {
@@ -612,7 +671,8 @@ const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
                     history: Array.isArray(history) ? history.slice(-12) : [],
                     userMessage,
                     currentStep,
-                    sessionId: session.id || null
+                    sessionId: session.id || null,
+                    activeQuestion: normalizeQuestionContext(activeQuestion)
                 })
             });
             if (!res.ok) return null;
@@ -664,8 +724,8 @@ const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
         }
     };
 
-    const runAiEvaluation = async (session, history, userMessage, currentStep) => {
-        const ragFirst = await callPythonRagEvaluate({ session, history, userMessage, currentStep });
+    const runAiEvaluation = async (session, history, userMessage, currentStep, activeQuestion = null) => {
+        const ragFirst = await callPythonRagEvaluate({ session, history, userMessage, currentStep, activeQuestion });
         if (ragFirst) return ragFirst;
 
         if (groqClients.length === 0) {
@@ -678,7 +738,7 @@ const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
             history,
             topK: 8
         });
-        const systemPrompt = buildEvaluationPrompt(session, currentStep, evidenceChunks);
+        const systemPrompt = buildEvaluationPrompt(session, currentStep, evidenceChunks, activeQuestion);
 
         for (let attempt = 0; attempt < groqClients.length; attempt += 1) {
             const activeClient = groqClients[(attempt + (groqClients.length - 1)) % groqClients.length] || groqClients[0];
@@ -796,7 +856,7 @@ const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
             }
         },
 
-        async respondAssessment({ sessionId, userMessage, currentStep }) {
+        async respondAssessment({ sessionId, userMessage, currentStep, activeQuestion, enforcePerQuestionAttempts = false }) {
             if (!sessionId || !userMessage) throw new ApiError(400, 'sessionId and userMessage are required');
 
             let session;
@@ -821,17 +881,28 @@ const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
             const history = Array.isArray(session.chat_history) ? [...session.chat_history] : [];
             history.push({ role: 'user', content: userMessage });
 
-            const evaluated = await runAiEvaluation(session, history, userMessage, currentStep || session.current_step || 'diagnostic');
+            const normalizedQuestion = normalizeQuestionContext(activeQuestion);
+            const evaluated = await runAiEvaluation(
+                session,
+                history,
+                userMessage,
+                currentStep || session.current_step || 'diagnostic',
+                normalizedQuestion
+            );
             const rubricScores = normalizeRubric(evaluated.rubricScores || {});
             const totalRubricScore = Object.values(rubricScores).reduce((sum, n) => sum + n, 0);
+            const questionPassed = totalRubricScore >= PASSING_MARKS;
+            const questionStatus = questionPassed ? 'passed' : 'failed';
 
             const nextStrikes = evaluated.weakResponse ? Number(session.strikes || 0) + 1 : Number(session.strikes || 0);
-            const disqualified = nextStrikes >= MAX_STRIKES || Boolean(evaluated.isDisqualified);
-            const finalStatus = disqualified
-                ? 'disqualified'
-                : (evaluated.nextStep === 'complete' || currentStep === 'final_recommendation')
-                    ? 'completed'
-                    : 'active';
+            const disqualified = !enforcePerQuestionAttempts && (nextStrikes >= MAX_STRIKES || Boolean(evaluated.isDisqualified));
+            const finalStatus = enforcePerQuestionAttempts
+                ? 'active'
+                : disqualified
+                    ? 'disqualified'
+                    : (evaluated.nextStep === 'complete' || currentStep === 'final_recommendation')
+                        ? 'completed'
+                        : 'active';
 
             const aiResponse = evaluated.response;
             history.push({ role: 'assistant', content: aiResponse });
@@ -897,7 +968,17 @@ const createApiService = ({ supabase, groqClients, getNextGroqClient }) => {
                 conversationalFeedback: buildConversationalFeedback(rubricScores, totalRubricScore, attemptsLeft, evaluated.nextStep || session.current_step),
                 fallbackMode: isFallback,
                 citations: Array.isArray(evaluated.citations) ? evaluated.citations : [],
-                retrievalMetrics: evaluated.retrievalMetrics || null
+                retrievalMetrics: evaluated.retrievalMetrics || null,
+                questionResult: normalizedQuestion
+                    ? {
+                        questionId: normalizedQuestion.id,
+                        questionIndex: normalizedQuestion.index,
+                        questionText: normalizedQuestion.text,
+                        status: questionStatus,
+                        passed: questionPassed,
+                        score: totalRubricScore
+                    }
+                    : null
             };
         },
 

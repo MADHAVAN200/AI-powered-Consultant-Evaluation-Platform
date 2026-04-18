@@ -1,6 +1,8 @@
 import os
 import socket
+import sys
 import threading
+from pathlib import Path
 from urllib.request import urlopen
 from urllib.error import URLError
 
@@ -24,6 +26,11 @@ def _health_ok(url: str) -> bool:
 
 
 def main() -> None:
+    # Ensure imports resolve when this script is launched outside backend cwd (e.g., npm --prefix backend).
+    service_dir = Path(__file__).resolve().parent
+    if str(service_dir) not in sys.path:
+        sys.path.insert(0, str(service_dir))
+
     host = os.getenv("RAG_HOST", "0.0.0.0")
     port = int(os.getenv("RAG_PORT", "8001"))
     health_url = f"http://127.0.0.1:{port}/health"
@@ -36,7 +43,7 @@ def main() -> None:
             return
         raise RuntimeError(f"Port {port} is in use by a non-RAG process")
 
-    uvicorn.run("python_rag_service.app:app", host=host, port=port, reload=False)
+    uvicorn.run("app:app", host=host, port=port, reload=False)
 
 
 if __name__ == "__main__":

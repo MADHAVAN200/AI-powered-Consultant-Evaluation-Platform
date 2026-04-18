@@ -113,6 +113,7 @@ class EvaluateRequest(BaseModel):
     userMessage: str
     currentStep: str = "diagnostic"
     sessionId: Optional[str] = None
+    activeQuestion: Optional[Dict[str, Any]] = None
 
 
 class IndexRequest(BaseModel):
@@ -495,11 +496,29 @@ def rag_evaluate(req: EvaluateRequest) -> Dict[str, Any]:
         [f"[{c.get('chunk_id')}] ({c.get('section')}) {c.get('content')}" for c in chunks]
     )
 
+    active_question = req.activeQuestion if isinstance(req.activeQuestion, dict) else {}
+    active_question_text = _normalize_text(active_question.get("text") or active_question.get("question") or "")
+    try:
+        active_question_index = max(0, int(active_question.get("index") or 0))
+    except Exception:
+        active_question_index = 0
+    try:
+        active_question_total = max(active_question_index + 1, int(active_question.get("total") or active_question_index + 1))
+    except Exception:
+        active_question_total = active_question_index + 1
+    active_question_block = (
+        f"ACTIVE_QUESTION: {active_question_index + 1}/{active_question_total} - {active_question_text}\n"
+        "You must evaluate the candidate specifically for this question and ask exactly one counter-question that deepens this same question."
+        if active_question_text
+        else "ACTIVE_QUESTION: none"
+    )
+
     prompt = f"""
 You are a strategy-case interviewer. Use ONLY the evidence pack below.
 If evidence is insufficient, ask clarifying question and do not invent facts.
 
 CURRENT_PHASE: {req.currentStep}
+{active_question_block}
 
 EVIDENCE_PACK:
 {evidence_pack}
