@@ -125,6 +125,11 @@ const prettifyMetricLabel = (raw = '') => String(raw)
     .replace(/\b\w/g, (c) => c.toUpperCase())
     .trim();
 
+const toMetricKey = (raw = '') => String(raw || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+
 const getMetricDirection = (label = '') => {
     const key = String(label).toLowerCase();
     if (/cost|complaint|churn|delay|debt|risk|downtime|attrition|days sales outstanding/.test(key)) return 'lower';
@@ -137,6 +142,101 @@ const getMetricFocusArea = (label = '') => {
     if (/complaint|churn|client|customer|rating|nps|quality/.test(key)) return 'customer';
     if (/delay|logistics|cycle|headcount|maintenance|utilization|efficiency/.test(key)) return 'operations';
     return 'strategy';
+};
+
+const isMetricsSection = (section) => {
+    if (!section || typeof section !== 'object') return false;
+    if (String(section.role || '').toLowerCase() === 'data') return true;
+    
+    const heading = String(section.heading || '').toLowerCase();
+    const sourceKey = String(section.sourceKey || '').toLowerCase();
+    const content = String(section.content || '').toLowerCase();
+    const combined = `${heading} ${sourceKey}`;
+
+    if (/(metric|kpi|financial|finance|revenue|profit|cost|margin|trend|timeseries|time series|data series|dataset|analytics|balance sheet|asset|liabilit|cash flow|income statement)/.test(combined)) {
+        return true;
+    }
+
+    const numberSignals = (content.match(/-?\d+(?:\.\d+)?/g) || []).length;
+    const hasSeriesPattern = /(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|q1|q2|q3|q4|month|quarter)/.test(content);
+    return numberSignals >= 8 && hasSeriesPattern;
+};
+
+// Mirrors AdminEvaluation inline-chart extraction so candidates see visualizations
+// directly from section content (without relying only on financial_data mapping).
+const extractInlineSeries = (text = '') => {
+    const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+    const groups = [];
+    let currentGroup = null;
+    let pendingLabel = '';
+
+    for (const line of lines) {
+        const stripped = line.replace(/^[•\-\*]\s*/, '').trim();
+        const kvMatch = stripped.match(/^([^:]{1,60}):\s*([-+]?\d[\d,.]*(?:\.\d+)?)\s*([A-Za-z%/]*)\s*$/);
+        if (kvMatch) {
+            const pointLabel = kvMatch[1].trim();
+            const value = parseFloat(kvMatch[2].replace(/,/g, ''));
+            if (Number.isFinite(value)) {
+                if (!currentGroup) {
+                    currentGroup = { groupLabel: pendingLabel || 'Series', points: [] };
+                    groups.push(currentGroup);
+                }
+                currentGroup.points.push({ label: pointLabel, value });
+                continue;
+            }
+        }
+
+        if (currentGroup) {
+            if (currentGroup.points.length < 2) groups.pop();
+            currentGroup = null;
+        }
+
+        if (stripped.length > 0 && stripped.length < 60 && !stripped.includes('.') && stripped.endsWith(':')) {
+            pendingLabel = stripped.slice(0, -1).trim();
+        } else if (stripped.length > 0 && stripped.length < 60) {
+            pendingLabel = stripped;
+        }
+    }
+
+    if (currentGroup && currentGroup.points.length < 2) groups.pop();
+
+    return groups.filter((g) => g.points.length >= 2);
+};
+
+const tokenizeSimple = (text = '') => String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((t) => t.length > 2);
+
+const metricBelongsToSection = (row, section) => {
+    if (!row) return false;
+    if (!section) return true;
+
+    const sectionText = `${section.heading || ''} ${section.sourceKey || ''} ${section.content || ''}`.toLowerCase();
+    const metricText = `${row.key || ''} ${row.label || ''}`.toLowerCase();
+
+    const inFinancialSection = /financial|revenue|profit|margin|cost|ebitda|cash|income|expense/.test(sectionText);
+    const inCustomerSection = /customer|marketing|retention|acquisition|nps|satisfaction|churn|conversion/.test(sectionText);
+    const inOperationsSection = /operations|operational|delivery|logistics|process|efficiency|utilization|downtime/.test(sectionText);
+    const inTrendSection = /time series|timeseries|trend|event|timeline|month|quarter/.test(sectionText);
+
+    if (inFinancialSection) {
+        return /revenue|profit|margin|cost|ebitda|cash|arpu|aov|pricing|income|expense|burn/.test(metricText);
+    }
+    if (inCustomerSection) {
+        return /churn|retention|customer|nps|cac|ltv|conversion|repeat|complaint|satisfaction/.test(metricText);
+    }
+    if (inOperationsSection) {
+        return /delay|delivery|cycle|utilization|downtime|sla|throughput|inventory|defect|backlog|ops|operations/.test(metricText);
+    }
+    if (inTrendSection) {
+        return /trend|month|quarter|time|series|growth|rate|revenue|profit|cost|churn|delivery/.test(metricText);
+    }
+
+    const sectionTokens = new Set(tokenizeSimple(sectionText));
+    const metricTokens = tokenizeSimple(metricText);
+    return metricTokens.some((t) => sectionTokens.has(t));
 };
 
 const keywordSetFromText = (text = '') => {
@@ -205,7 +305,92 @@ const buildQuestionCoverage = (questions = [], allCandidateAnswers = '') => {
     return Math.round((covered / questions.length) * 100);
 };
 
-const extractProblemQuestions = (caseStudy = {}, fallback = 'Please diagnose the core problem and propose a quantified action plan.') => {
+const normalizeQuestionText = (text = '') => String(text || '')
+    .replace(/^\s*\d+[).:\s]+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+const isLegacyInitialPrompt = (content = '') => {
+    const text = String(content || '').toLowerCase();
+    return text.includes('welcome to your')
+        || text.includes('here are your problem questions')
+        || text.includes('please begin with your diagnostic hypothesis');
+};
+
+const extractProblemQuestions = (caseStudy = {}, draftSections = [], fallback = 'Please diagnose the core problem and propose a quantified action plan.') => {
+    const extractLineQuestions = (text) => {
+        const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+        return lines
+            .map((line) => {
+                const m = line.replace(/^[•\-\*]\s*/, '').match(/^(\d+)[.)\s]\s*(.{8,})$/);
+                return m ? String(m[2] || '').trim() : '';
+            })
+            .filter(Boolean);
+    };
+
+    const extractInlineQuestions = (text) => {
+        const flat = String(text || '').replace(/\s+/g, ' ').trim();
+        return [...flat.matchAll(/(?:^|\s)\d+[).:]\s*(.+?)(?=(?:\s+\d+[).:]\s)|$)/g)]
+            .map((m) => String(m[1] || '').trim())
+            .filter((q) => q.length > 8);
+    };
+
+    // 1) Match AdminEvaluation behavior: derive from displayed problem-like sections first.
+    const problemSections = (Array.isArray(draftSections) ? draftSections : []).filter((s) =>
+        String(s?.role || '') === 'problem' ||
+        /question|problem|statement|challenge|task|objective|deliverable/i.test(String(s?.heading || ''))
+    );
+
+    const found = [];
+    for (const sec of problemSections) {
+        const lineBased = extractLineQuestions(sec?.content || '');
+        if (lineBased.length > 0) {
+            found.push(...lineBased);
+            continue;
+        }
+        const inline = extractInlineQuestions(sec?.content || '');
+        if (inline.length > 0) found.push(...inline);
+    }
+
+    if (found.length > 0) {
+        return found.map((text, idx) => ({
+            id: `q-${idx + 1}`,
+            index: idx,
+            text: normalizeQuestionText(text),
+            status: 'not_attempted',
+            attempted: false,
+            flagged: false,
+            attempts: 0,
+            lastScore: null,
+            locked: false
+        }));
+    }
+
+    // 2) Fallback to canonical problem statement fields.
+    const problemText = String(
+        caseStudy?.problem_statement ||
+        caseStudy?.problemStatement ||
+        ''
+    );
+    const lineBasedFromProblem = extractLineQuestions(problemText);
+    const inlineFromProblem = extractInlineQuestions(problemText);
+    const numbered = lineBasedFromProblem.length > 0 ? lineBasedFromProblem : inlineFromProblem;
+
+    if (numbered.length > 0) {
+        return numbered.map((text, idx) => ({
+            id: `q-${idx + 1}`,
+            index: idx,
+            text: normalizeQuestionText(text),
+            status: 'not_attempted',
+            attempted: false,
+            flagged: false,
+            attempts: 0,
+            lastScore: null,
+            locked: false
+        }));
+    }
+
+    // 3. Fallback to parsed sections
     const parsedSections = caseStudy?.parsed_sections || caseStudy?.parsedSections || {};
     const parsedQuestions = Array.isArray(parsedSections?._problemQuestions)
         ? parsedSections._problemQuestions.map((q) => String(q || '').trim()).filter(Boolean)
@@ -215,40 +400,21 @@ const extractProblemQuestions = (caseStudy = {}, fallback = 'Please diagnose the
         return parsedQuestions.map((text, idx) => ({
             id: `q-${idx + 1}`,
             index: idx,
-            text,
+            text: normalizeQuestionText(text),
             status: 'not_attempted',
             attempted: false,
             flagged: false,
             attempts: 0,
-            lastScore: null
+            lastScore: null,
+            locked: false
         }));
     }
 
-    const initialPrompt = caseStudy?.initial_prompt || caseStudy?.initialPrompt || '';
-    const lines = String(initialPrompt || '')
-        .split('\n')
-        .map((l) => l.trim())
-        .filter(Boolean);
-
-    let numbered = lines
-        .filter((line) => /^\d+[).:]\s+/.test(line))
-        .map((line) => line.replace(/^\d+[).:]\s*/, '').trim())
-        .filter(Boolean);
-
-    if (numbered.length < 2) {
-        const flattened = String(initialPrompt || '').replace(/\s+/g, ' ').trim();
-        const inlineMatches = [...flattened.matchAll(/(?:^|\s)\d+[).:]\s*(.+?)(?=(?:\s+\d+[).:]\s)|$)/g)];
-        const inline = inlineMatches
-            .map((m) => String(m[1] || '').trim())
-            .filter((q) => q.length > 8);
-        if (inline.length > 0) numbered = inline;
-    }
-
-    const questions = numbered.length > 0 ? numbered : [fallback];
-    return questions.map((text, idx) => ({
+    // 4. Last resort fallback
+    return (fallback || '').split('\n').filter(l => l.trim().length > 4).map((text, idx) => ({
         id: `q-${idx + 1}`,
         index: idx,
-        text,
+        text: normalizeQuestionText(text),
         status: 'not_attempted',
         attempted: false,
         flagged: false,
@@ -276,14 +442,21 @@ const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep
 
 const inferMetricUnit = (key = '', values = []) => {
     const k = String(key).toLowerCase();
+    const maxVal = Math.max(...values.map((n) => Math.abs(Number(n) || 0)), 0);
+    const looksMonetary = /(revenue|sales|spend|budget|marketing|logistics|cost|profit|income|ebitda|cash|investment|pricing|price|arpu|cac|ltv|aov|gmv|arr|mrr|dollar)/.test(k);
+
     if (k.includes('pct') || k.includes('percent') || k.includes('rate') || k.includes('margin')) return 'percent';
     if (k.includes('ratio')) return 'ratio';
     if (k.includes('days') || k.includes('delivery_time')) return 'days';
     if (k.endsWith('_cr')) return 'inr_cr';
-    if (k.endsWith('_l') || k.endsWith('_lakhs')) return 'inr_lakh';
-    if (k.includes('cac') || k.includes('ltv') || k.includes('aov') || k.includes('price') || k.includes('cost')) return 'inr';
+    if (k.endsWith('_l') || k.endsWith('_lakhs') || k.includes('lakh')) return 'inr_lakh';
+    if (k.includes('crore') || k.includes('cr_')) return 'inr_cr';
+    if (looksMonetary) {
+        if (maxVal >= 1000) return 'inr';
+        if (maxVal >= 100) return 'inr_cr';
+        return 'inr_lakh';
+    }
 
-    const maxVal = Math.max(...values.map((n) => Math.abs(Number(n) || 0)), 0);
     if (maxVal <= 100 && values.some((n) => Number(n) % 1 !== 0)) return 'percent';
     return 'count';
 };
@@ -304,8 +477,8 @@ const unitDisplayLabel = (unit = 'count') => {
     if (unit === 'percent') return '%';
     if (unit === 'ratio') return 'Ratio (x)';
     if (unit === 'days') return 'Days';
-    if (unit === 'inr') return 'INR';
-    if (unit === 'inr_cr') return 'INR Cr';
+    if (unit === 'inr') return 'INR (Rs)';
+    if (unit === 'inr_cr') return 'INR Crore';
     if (unit === 'inr_lakh') return 'INR Lakh';
     return 'Count';
 };
@@ -364,7 +537,7 @@ const MetricLineChart = ({ label, values = [], xLabels = [], unit = 'count' }) =
         <article className="line-chart-card">
             <div className="line-chart-header">
                 <h4>{label}</h4>
-                <span>{unit.replace('_', ' ')}</span>
+                <span>{unitDisplayLabel(unit)}</span>
             </div>
             <svg className="line-chart-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${label} line chart`}>
                 <line x1={leftPad} y1={topPad} x2={leftPad} y2={topPad + plotH} className="axis-line" />
@@ -412,6 +585,65 @@ const getParsedSectionsFromCase = (caseStudy = {}) => {
     return {};
 };
 
+const buildSectionsFromDraft = (draft) => {
+    if (!draft) return [];
+    const sections = [];
+    const seenKeys = new Set();
+
+    const pushSection = (section) => {
+        if (!section || typeof section !== 'object') return;
+        const content = String(section.content || '').trim();
+        const heading = String(section.heading || '').trim();
+        if (!heading || content.length < 10) return;
+        const normKey = heading.toLowerCase().replace(/[^a-z0-9]+/g, '_');
+        if (seenKeys.has(normKey)) return;
+        seenKeys.add(normKey);
+        sections.push({ ...section, heading, content });
+    };
+
+    const parsedSections = getParsedSectionsFromCase(draft);
+    const llmSections = Array.isArray(parsedSections._sections)
+        ? parsedSections._sections
+        : [];
+
+    if (llmSections.length > 0) {
+        llmSections.forEach((s, idx) => {
+            pushSection({
+                id: `llm-${idx}`,
+                heading: s.heading,
+                content: s.content,
+                role: s.role || 'other',
+                kind: 'llm'
+            });
+        });
+        return sections;
+    }
+
+    if (String(draft.context || '').trim().length > 10) {
+        pushSection({ id: 'h-overview', heading: 'Overview', content: draft.context, role: 'context', kind: 'heuristic' });
+    }
+    if (String(draft.problemStatement || '').trim().length > 10) {
+        pushSection({ id: 'h-problem', heading: 'Problem Statement', content: draft.problemStatement, role: 'problem', kind: 'heuristic' });
+    }
+    if (String(draft.initialPrompt || '').trim().length > 10) {
+        pushSection({ id: 'h-opening', heading: 'Opening Prompt', content: draft.initialPrompt, role: 'prompt', kind: 'heuristic' });
+    }
+    Object.entries(parsedSections)
+        .filter(([k, v]) => !String(k).startsWith('_') && String(v || '').trim().length > 10)
+        .forEach(([key, value], idx) => {
+            pushSection({
+                id: `h-parsed-${idx + 1}`,
+                heading: prettifyMetricLabel(key),
+                sourceKey: key,
+                content: String(value || '').trim(),
+                role: 'other',
+                kind: 'heuristic'
+            });
+        });
+
+    return sections;
+};
+
 const normalizeMockDrillMode = (caseStudy = {}) => {
     const parsedSections = getParsedSectionsFromCase(caseStudy);
     const caseModeRaw = parsedSections?._caseMode || caseStudy?.case_mode || caseStudy?.caseMode || '';
@@ -422,25 +654,24 @@ const normalizeMockDrillMode = (caseStudy = {}) => {
     return enabledByMode || enabledByFlag || hasLeverConfig;
 };
 
-const buildDefaultLeversFromMetrics = (financialData = {}) => {
-    return Object.entries(financialData || {})
-        .filter(([, values]) => Array.isArray(values) && values.length > 1)
-        .slice(0, 8)
-        .map(([metricKey, values], idx) => ({
-            id: `${metricKey}_${idx + 1}`,
-            group: /revenue|profit|margin|cost|cash|ebitda/.test(metricKey) ? 'Financial' : /churn|customer|nps|cac|ltv|conversion/.test(metricKey) ? 'Market' : /delay|delivery|ops|inventory|utilization/.test(metricKey) ? 'Operations' : 'Strategy',
-            label: `${prettifyMetricLabel(metricKey)} Lever`,
-            metricKey,
+const buildDefaultLeversFromMetricRows = (rows = []) => {
+    return (rows || [])
+        .filter((row) => row?.key && Array.isArray(row?.values) && row.values.length > 1)
+        .map((row, idx) => ({
+            id: `${row.key}_${idx + 1}`,
+            group: /revenue|profit|margin|cost|cash|ebitda/.test(row.key) ? 'Financial' : /churn|customer|nps|cac|ltv|conversion/.test(row.key) ? 'Market' : /delay|delivery|ops|inventory|utilization/.test(row.key) ? 'Operations' : 'Strategy',
+            label: `${prettifyMetricLabel(row.key)} Lever`,
+            metricKey: row.key,
             min: -30,
             max: 30,
-            step: 5,
+            step: 1,
             defaultValue: 0,
             weight: 1,
-            _baselineValues: values.map(Number).filter(Number.isFinite)
+            _baselineValues: row.values.map(Number).filter(Number.isFinite)
         }));
 };
 
-const resolveMockDrillLevers = (caseStudy = {}) => {
+const resolveMockDrillLevers = (caseStudy = {}, fallbackMetricRows = []) => {
     const parsedSections = getParsedSectionsFromCase(caseStudy);
     const configured = Array.isArray(parsedSections?._mockDrill?.levers) ? parsedSections._mockDrill.levers : [];
     if (configured.length > 0) {
@@ -451,18 +682,19 @@ const resolveMockDrillLevers = (caseStudy = {}) => {
             metricKey: String(lever.metricKey || ''),
             min: Number.isFinite(Number(lever.min)) ? Number(lever.min) : -30,
             max: Number.isFinite(Number(lever.max)) ? Number(lever.max) : 30,
-            step: Number.isFinite(Number(lever.step)) && Number(lever.step) > 0 ? Number(lever.step) : 5,
+            step: 1,
             defaultValue: Number.isFinite(Number(lever.defaultValue)) ? Number(lever.defaultValue) : 0,
             weight: Number.isFinite(Number(lever.weight)) ? Number(lever.weight) : 1
         })).filter((l) => l.metricKey);
     }
 
-    return buildDefaultLeversFromMetrics(caseStudy?.financial_data || {});
+    return buildDefaultLeversFromMetricRows(fallbackMetricRows);
 };
 
 const applyMockDrillToMetricRows = (baseRows = [], levers = [], valuesByLeverId = {}) => {
     if (!Array.isArray(baseRows) || baseRows.length === 0) return [];
     const rows = baseRows.map((row) => ({ ...row, values: [...(row.values || [])] }));
+    const normalizeKey = (raw = '') => String(raw || '').toLowerCase().replace(/[^a-z0-9]/g, '');
     const metricLevers = {};
     for (const lever of levers || []) {
         if (!lever?.metricKey) continue;
@@ -471,19 +703,40 @@ const applyMockDrillToMetricRows = (baseRows = [], levers = [], valuesByLeverId 
     }
 
     return rows.map((row) => {
-        const linkedLevers = metricLevers[row.key] || [];
+        let linkedLevers = metricLevers[row.key] || [];
+        if (linkedLevers.length === 0) {
+            const rowNorm = normalizeKey(row.key);
+            linkedLevers = (levers || []).filter((lever) => {
+                const leverNorm = normalizeKey(lever?.metricKey || '');
+                if (!leverNorm || !rowNorm) return false;
+                return rowNorm.includes(leverNorm) || leverNorm.includes(rowNorm);
+            });
+        }
         if (linkedLevers.length === 0) return row;
 
         const nextValues = [...row.values];
-        const multiplier = linkedLevers.reduce((acc, lever) => {
+        const totalImpact = linkedLevers.reduce((acc, lever) => {
             const current = Number(valuesByLeverId?.[lever.id] ?? lever.defaultValue ?? 0);
             const bounded = Math.max(Number(lever.min), Math.min(Number(lever.max), current));
             const weight = Number.isFinite(Number(lever.weight)) ? Number(lever.weight) : 1;
-            return acc * (1 + (bounded / 100) * weight);
-        }, 1);
+            return acc + (bounded / 100) * weight;
+        }, 0);
+
+        const rowDirection = getMetricDirection(row.key);
+        const signedImpact = rowDirection === 'lower' ? -totalImpact : totalImpact;
+
+        const periods = Math.max(1, nextValues.length - 1);
+        const baseDelta = nextValues.length > 1
+            ? Number(nextValues[nextValues.length - 1]) - Number(nextValues[0])
+            : 0;
 
         for (let i = 0; i < nextValues.length; i += 1) {
-            nextValues[i] = Number((Number(nextValues[i]) * multiplier).toFixed(2));
+            const base = Number(nextValues[i]) || 0;
+            const timeWeight = periods > 0 ? i / periods : 1;
+            const levelShift = signedImpact * (0.18 + 0.82 * timeWeight);
+            const slopeShift = signedImpact * (0.55 * timeWeight * timeWeight) * (baseDelta || Math.max(1, Math.abs(base)));
+            const adjusted = (base * (1 + levelShift)) + slopeShift;
+            nextValues[i] = Number(adjusted.toFixed(2));
         }
 
         const delta = nextValues.length > 1 ? nextValues[nextValues.length - 1] - nextValues[0] : 0;
@@ -501,13 +754,18 @@ const applyMockDrillToMetricRows = (baseRows = [], levers = [], valuesByLeverId 
     });
 };
 
-const isLikelyMetricSeriesLine = (text = '') => {
-    const line = String(text || '').trim();
-    if (!line) return false;
-    const hasMetricWord = /(revenue|profit|margin|cost|churn|ratio|spend|kpi|metric|trend|active user|cac|ltv|retention)/i.test(line);
-    const numbers = line.match(/-?\d+(?:\.\d+)?/g) || [];
-    const hasSeriesSeparator = /[:,]/.test(line);
-    return hasMetricWord && numbers.length >= 3 && hasSeriesSeparator;
+const clampLeverValue = (value, lever) => {
+    const min = Number(lever?.min);
+    const max = Number(lever?.max);
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return Number(lever?.defaultValue ?? 0);
+    const bounded = Math.max(min, Math.min(max, parsed));
+    return Math.round(bounded);
+};
+
+const getLeverValue = (lever, simulationValues = {}) => {
+    const raw = simulationValues?.[lever?.id] ?? lever?.defaultValue ?? 0;
+    return clampLeverValue(raw, lever);
 };
 
 // ─── Main Component ────────────────────────────────────────────────────────
@@ -534,13 +792,13 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
     const [scoring, setScoring] = useState(null);
     const [coachNote, setCoachNote] = useState('Answer with data-backed reasoning. Reference specific metrics from the case document.');
     const [error, setError] = useState(null);
-    const [metricViewMode, setMetricViewMode] = useState('case');
     const [activeCaseSection, setActiveCaseSection] = useState('overview');
     const [theme, setTheme] = useState(getInitialTheme);
     const [leftWidth, setLeftWidth] = useState(() => window.innerWidth <= 1280 ? 280 : 300);
     const [rightWidth, setRightWidth] = useState(() => window.innerWidth <= 1280 ? 340 : 370);
     const [questionTracker, setQuestionTracker] = useState([]);
     const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
+    const [questionAnswerLog, setQuestionAnswerLog] = useState({});
     const [simulationValues, setSimulationValues] = useState({});
     const [simulationRows, setSimulationRows] = useState([]);
     const [simulationRunsByQuestionId, setSimulationRunsByQuestionId] = useState({});
@@ -602,23 +860,34 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
         }));
     }, [session?.id, questionTracker, activeQuestionIndex]);
 
+    useEffect(() => {
+        // Reset view state when interviewer moves to another question.
+    }, [activeQuestionIndex]);
+
     const applySessionData = (sess, cs) => {
         setSession(sess);
         setCaseStudy(cs);
-        setBriefSections([]);
-        setSectionPayloads({});
-        setSectionLoadingKey('');
-        setSectionError('');
-        setActiveCaseSection('overview');
+        const draftSections = buildSectionsFromDraft(cs);
+        setBriefSections(draftSections);
+        setActiveCaseSection(draftSections.length > 0 ? draftSections[0].id : 'overview');
+        const extractedQuestions = extractProblemQuestions(cs || {}, draftSections);
+        const initialPromptText = String(cs?.initial_prompt || cs?.initialPrompt || '').trim().toLowerCase();
         const history = Array.isArray(sess.chat_history) && sess.chat_history.length > 0
-            ? sess.chat_history
-            : [{ role: 'assistant', content: cs.initial_prompt }];
+            ? sess.chat_history.filter((m) => {
+                if (m?.role !== 'assistant') return true;
+                const msg = String(m?.content || '').trim().toLowerCase();
+                if (!msg) return false;
+                if (isLegacyInitialPrompt(msg)) return false;
+                if (initialPromptText && msg === initialPromptText) return false;
+                return true;
+            })
+            : [];
         setMessages(history);
+        setQuestionAnswerLog({});
         setStatus(sess.status || 'active');
         setStrikes(sess.strikes || 0);
         setAttemptsLeft(Math.max(0, 3 - (sess.strikes || 0)));
         setCurrentStep(sess.current_step || 'diagnostic');
-        const extractedQuestions = extractProblemQuestions(cs || {});
         const trackerStorageKey = `assessment-question-tracker-${sess.id}`;
         const storedTrackerRaw = localStorage.getItem(trackerStorageKey);
 
@@ -626,7 +895,13 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
             try {
                 const parsed = JSON.parse(storedTrackerRaw);
                 const storedQuestions = Array.isArray(parsed?.questionTracker) ? parsed.questionTracker : [];
-                if (storedQuestions.length === extractedQuestions.length) {
+                const normalizeQ = (q) => String(q || '').replace(/^\d+[).:\s]+/, '').replace(/\s+/g, ' ').trim().toLowerCase();
+                const sameLength = storedQuestions.length === extractedQuestions.length;
+                const sameSequence = sameLength && storedQuestions.every((q, idx) =>
+                    normalizeQ(q?.text) === normalizeQ(extractedQuestions[idx]?.text)
+                );
+
+                if (sameSequence) {
                     setQuestionTracker(storedQuestions);
                     setActiveQuestionIndex(Math.max(0, Math.min(storedQuestions.length - 1, Number(parsed?.activeQuestionIndex || 0))));
                 } else {
@@ -644,27 +919,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
         setLoading(false);
     };
 
-    useEffect(() => {
-        if (!caseStudy?.id) {
-            setBriefSections([]);
-            return;
-        }
 
-        let cancelled = false;
-        const fetchBriefSections = async () => {
-            try {
-                const res = await axios.get(`${API_BASE}/case-studies/${caseStudy.id}/brief`);
-                const dbSections = Array.isArray(res.data?.brief?.sections) ? res.data.brief.sections : [];
-                if (cancelled) return;
-                setBriefSections(dbSections);
-            } catch {
-                if (!cancelled) setBriefSections([]);
-            }
-        };
-
-        fetchBriefSections();
-        return () => { cancelled = true; };
-    }, [caseStudy?.id]);
 
     const validateAndStart = async () => {
         setLoading(true); setError(null);
@@ -697,12 +952,17 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
         if (!input.trim() || isSending || status !== 'active') return;
         const userMsg = input.trim();
         const activeQuestion = questionTracker[activeQuestionIndex] || null;
+        const activeQuestionId = activeQuestion?.id || 'global';
         if (activeQuestion && isQuestionClosed(activeQuestion)) {
             setCoachNote('This question is closed (passed or 3 attempts completed). Move to another open question.');
             return;
         }
         setInput('');
-        setMessages(prev => [...prev, { role: 'user', content: userMsg }]);
+        setMessages(prev => [...prev, { role: 'user', content: userMsg, questionId: activeQuestionId }]);
+        setQuestionAnswerLog((prev) => ({
+            ...prev,
+            [activeQuestionId]: [...(Array.isArray(prev[activeQuestionId]) ? prev[activeQuestionId] : []), userMsg]
+        }));
         setIsSending(true);
         try {
             const res = await axios.post(`${API_BASE}/assess/respond`, {
@@ -720,7 +980,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                 enforcePerQuestionAttempts: true
             });
             if (res.data.success) {
-                setMessages(prev => [...prev, { role: 'assistant', content: res.data.aiResponse }]);
+                setMessages(prev => [...prev, { role: 'assistant', content: res.data.aiResponse, questionId: activeQuestionId }]);
                 setStatus(res.data.status);
                 setStrikes(res.data.strikes);
                 setAttemptsLeft(res.data.attemptsLeft ?? Math.max(0, 3 - (res.data.strikes || 0)));
@@ -776,15 +1036,41 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
         } finally { setIsSending(false); }
     };
 
-    // ── Derive chart and cockpit data (must stay before conditional returns) ──
-    const chartSeries = Object.entries(caseStudy?.financial_data || {})
-        .filter(([, v]) => Array.isArray(v) && v.length > 1)
-        .slice(0, 5);
+    // ── Derive Sections from caseStudy directly (matches Admin UI) ──
+    useEffect(() => {
+        if (!caseStudy) return;
+        const draftSections = buildSectionsFromDraft(caseStudy);
+        setBriefSections(draftSections);
+        if (draftSections.length > 0 && !draftSections.find(s => s.id === activeCaseSection)) {
+            setActiveCaseSection(draftSections[0].id);
+        }
+    }, [caseStudy]);
 
+    const activeSectionData = useMemo(() => briefSections.find(s => s.id === activeCaseSection), [briefSections, activeCaseSection]);
+    const activeInlineSeries = useMemo(() => extractInlineSeries(activeSectionData?.content || ''), [activeSectionData]);
+    const activeInlineMetricRows = useMemo(() => {
+        return (activeInlineSeries || []).map((series, idx) => {
+            const values = (series?.points || []).map((p) => Number(p?.value)).filter(Number.isFinite);
+            const keySeed = series?.groupLabel || `series_${idx + 1}`;
+            const key = toMetricKey(keySeed) || `series_${idx + 1}`;
+            const delta = values.length > 1 ? values[values.length - 1] - values[0] : 0;
+            const improving = values.length > 1 ? values[values.length - 1] >= values[0] : true;
+            return {
+                key,
+                label: String(series?.groupLabel || `Series ${idx + 1}`),
+                unit: inferMetricUnit(key, values),
+                values,
+                quarterly: aggregateQuarterly(values),
+                delta,
+                improving
+            };
+        }).filter((row) => Array.isArray(row.values) && row.values.length > 0);
+    }, [activeInlineSeries]);
+
+    // ── Derive chart and cockpit data (must stay before conditional returns) ──
     const threshold = Number(caseStudy?.threshold_passing_score ?? 0.6);
     const passingMarks = Math.round((Number.isFinite(threshold) ? threshold : 0.6) * 100);
 
-    const numberedQs = questionTracker.map((q) => q.text).filter(Boolean);
     const activeQuestion = questionTracker[activeQuestionIndex] || null;
     const activeQuestionAttempts = Number(activeQuestion?.attempts || 0);
     const activeQuestionAttemptsLeft = Math.max(0, 3 - activeQuestionAttempts);
@@ -794,41 +1080,78 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
     const passedQuestionCount = questionTracker.filter((q) => q.status === 'passed').length;
     const failedQuestionCount = questionTracker.filter((q) => q.status === 'failed').length;
     const flaggedQuestionCount = questionTracker.filter((q) => q.flagged && !q.attempted).length;
+    const activeQuestionId = activeQuestion?.id || 'global';
 
-    const candidateMessages = messages.filter((m) => m.role === 'user').map((m) => String(m.content || ''));
-    const latestCandidateAnswer = candidateMessages[candidateMessages.length - 1] || '';
-    const hasCandidateProgress = candidateMessages.some((msg) => msg.trim().length > 0);
+    const activeQuestionAnswers = Array.isArray(questionAnswerLog[activeQuestionId]) ? questionAnswerLog[activeQuestionId] : [];
+    const latestActiveQuestionAnswer = activeQuestionAnswers[activeQuestionAnswers.length - 1] || '';
+    const activeQuestionAnswerCorpus = activeQuestionAnswers.join(' ').trim();
+    const hasActiveQuestionProgress = activeQuestionAnswerCorpus.length > 0;
+
+    const inlineSeriesData = useMemo(() => {
+        if (!Array.isArray(briefSections) || briefSections.length === 0) return {};
+        const map = {};
+
+        for (const section of briefSections) {
+            const sectionSeed = toMetricKey(section?.sourceKey || section?.heading || section?.id || 'section');
+            const groups = extractInlineSeries(section?.content || '');
+
+            groups.forEach((series, idx) => {
+                const values = (series?.points || []).map((p) => Number(p?.value)).filter(Number.isFinite);
+                if (values.length < 2) return;
+
+                let key = toMetricKey(`${sectionSeed}_${series?.groupLabel || `series_${idx + 1}`}`);
+                if (!key) key = `series_${sectionSeed}_${idx + 1}`;
+
+                if (Array.isArray(map[key]) && map[key].length >= values.length) return;
+                map[key] = values;
+            });
+        }
+
+        return map;
+    }, [briefSections]);
+
+    const mergedNumericData = useMemo(() => {
+        const financialData = (caseStudy?.financial_data && typeof caseStudy.financial_data === 'object')
+            ? caseStudy.financial_data
+            : {};
+        const parsedSections = getParsedSectionsFromCase(caseStudy || {});
+        const numericFromParsed = (parsedSections && typeof parsedSections._numericSeries === 'object')
+            ? Object.fromEntries(
+                Object.entries(parsedSections._numericSeries).map(([k, v]) => [k, Array.isArray(v?.values) ? v.values : []])
+            )
+            : {};
+
+        return {
+            ...inlineSeriesData,
+            ...numericFromParsed,
+            ...financialData
+        };
+    }, [caseStudy, inlineSeriesData]);
 
     // Stable string representation for deps (avoid re-creating arrays)
-    const candidateTexKey = useMemo(() => candidateMessages.join('|'), [messages]);
-    const financialDataKey = useMemo(() => JSON.stringify(caseStudy?.financial_data || {}), [caseStudy?.financial_data]);
+    const financialDataKey = useMemo(() => JSON.stringify(mergedNumericData || {}), [mergedNumericData]);
 
-    const questionCoverage = useMemo(
-        () => buildQuestionCoverage(numberedQs, candidateMessages.join(' ')),
-        [candidateTexKey]
+    const dynamicCockpitMetrics = useMemo(
+        () => buildCockpitMetrics(
+            mergedNumericData || {},
+            activeQuestionAnswerCorpus,
+            activeQuestion?.lastScore ?? scoreBreakdown?.totalScore
+        ),
+        [financialDataKey, activeQuestionAnswerCorpus, activeQuestion?.lastScore, scoreBreakdown?.totalScore, mergedNumericData]
     );
-
-    const cockpitMetrics = useMemo(
-        () => buildCockpitMetrics(caseStudy?.financial_data || {}, latestCandidateAnswer, scoreBreakdown?.totalScore),
-        [financialDataKey, latestCandidateAnswer, scoreBreakdown?.totalScore]
-    );
-
-    const focusTouchedCount = cockpitMetrics.filter((m) => m.touched).length;
-    const liveFocusRatio = cockpitMetrics.length > 0 ? Math.round((focusTouchedCount / cockpitMetrics.length) * 100) : 0;
 
     // Phase step labels
-    const stepLabels = { diagnostic: '01', brainstorming: '02', calculations: '03', final_recommendation: '04' };
     const stepNames  = { diagnostic: 'Diagnose', brainstorming: 'Brainstorm', calculations: 'Calculate', final_recommendation: 'Recommend' };
 
     const timelineLabels = useMemo(() => {
-        const seriesLen = Math.max(...Object.values(caseStudy?.financial_data || {}).map((v) => (Array.isArray(v) ? v.length : 0)), 0);
+        const seriesLen = Math.max(...Object.values(mergedNumericData || {}).map((v) => (Array.isArray(v) ? v.length : 0)), 0);
         if (seriesLen <= 0) return [];
         if (seriesLen <= 12) return monthNames.slice(0, seriesLen);
         return Array.from({ length: seriesLen }, (_, i) => `P${i + 1}`);
-    }, [caseStudy?.financial_data]);
+    }, [mergedNumericData]);
 
     const metricRows = useMemo(() => {
-        return Object.entries(caseStudy?.financial_data || {})
+        return Object.entries(mergedNumericData || {})
             .filter(([, v]) => Array.isArray(v) && v.length > 0)
             .map(([key, values]) => {
                 const nums = values.map(Number).filter(Number.isFinite);
@@ -847,24 +1170,23 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                     improving
                 };
             });
-    }, [caseStudy?.financial_data]);
+    }, [mergedNumericData]);
 
-    const staticKpis = useMemo(() => metricRows.slice(0, 8).map((row) => ({
-        key: row.key,
-        label: row.label,
-        current: row.values[row.values.length - 1] || 0,
-        delta: row.delta,
-        deltaPct: row.values.length > 1 && row.values[0] !== 0 ? ((row.values[row.values.length - 1] - row.values[0]) / Math.abs(row.values[0])) * 100 : 0,
-        isImproving: row.improving,
-        touched: false
-    })), [metricRows]);
+    const scopedMetricRows = useMemo(() => {
+        if (!activeSectionData) return [];
+        return metricRows.filter(row => metricBelongsToSection(row, activeSectionData));
+    }, [metricRows, activeSectionData]);
 
     const dynamicMetricRows = useMemo(() => {
-        if (!hasCandidateProgress) return metricRows;
+        if (!hasActiveQuestionProgress) return metricRows;
 
-        const signalMap = Object.fromEntries(cockpitMetrics.map((m) => [m.key, m]));
-        const influence = Math.max(0.25, ((questionCoverage / 100) + ((scoreBreakdown?.totalScore || 0) / 100)) / 2);
-        const weakAnswer = latestCandidateAnswer.trim().length < 40;
+        const signalMap = Object.fromEntries(dynamicCockpitMetrics.map((m) => [m.key, m]));
+        const activeQuestionCoverage = Math.max(
+            5,
+            buildQuestionCoverage(activeQuestion ? [activeQuestion.text] : [], activeQuestionAnswerCorpus)
+        );
+        const influence = Math.max(0.25, ((activeQuestionCoverage / 100) + ((scoreBreakdown?.totalScore || 0) / 100)) / 2);
+        const weakAnswer = latestActiveQuestionAnswer.trim().length < 40;
 
         return metricRows.map((row) => {
             const signal = signalMap[row.key];
@@ -896,36 +1218,146 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                 improving
             };
         });
-    }, [metricRows, cockpitMetrics, questionCoverage, scoreBreakdown?.totalScore, latestCandidateAnswer, hasCandidateProgress]);
+    }, [
+        metricRows,
+        dynamicCockpitMetrics,
+        activeQuestion,
+        activeQuestionAnswerCorpus,
+        latestActiveQuestionAnswer,
+        scoreBreakdown?.totalScore,
+        hasActiveQuestionProgress
+    ]);
+
+    const dynamicScopedMetricRows = useMemo(() => {
+        if (!activeSectionData) return [];
+        return dynamicMetricRows.filter((row) => metricBelongsToSection(row, activeSectionData));
+    }, [dynamicMetricRows, activeSectionData]);
+
+    const sectionOriginalMetricRows = useMemo(() => {
+        if (scopedMetricRows.length > 0) return scopedMetricRows;
+        return activeInlineMetricRows;
+    }, [scopedMetricRows, activeInlineMetricRows]);
+
+    const sectionDynamicMetricRows = useMemo(() => {
+        if (dynamicScopedMetricRows.length > 0) return dynamicScopedMetricRows;
+
+        if (sectionOriginalMetricRows.length === 0) return [];
+        if (!hasActiveQuestionProgress) return sectionOriginalMetricRows;
+
+        const signalEntries = Array.isArray(dynamicCockpitMetrics) ? dynamicCockpitMetrics : [];
+        const findSignal = (row) => {
+            const rowKey = String(row?.key || '').toLowerCase();
+            const rowLabel = String(row?.label || '').toLowerCase();
+            const matched = signalEntries.find((s) => {
+                const sk = String(s?.key || '').toLowerCase();
+                const sl = String(s?.label || s?.key || '').toLowerCase();
+                return sk === rowKey || sl === rowLabel || rowLabel.includes(sl) || sl.includes(rowLabel);
+            });
+
+            if (matched) return matched;
+
+            // Fallback for section-specific inline rows that are not in canonical metric map.
+            return {
+                key: row?.key || rowLabel,
+                label: row?.label || rowLabel,
+                direction: getMetricDirection(row?.key || row?.label || ''),
+                touched: candidateTouchesMetric(row?.label || row?.key || '', activeQuestionAnswerCorpus)
+            };
+        };
+
+        const activeQuestionCoverage = Math.max(
+            5,
+            buildQuestionCoverage(activeQuestion ? [activeQuestion.text] : [], activeQuestionAnswerCorpus)
+        );
+        const influence = Math.max(0.25, ((activeQuestionCoverage / 100) + ((scoreBreakdown?.totalScore || 0) / 100)) / 2);
+        const weakAnswer = latestActiveQuestionAnswer.trim().length < 40;
+
+        return sectionOriginalMetricRows.map((row, idx) => {
+            const signal = findSignal(row);
+            if (!signal || !Array.isArray(row.values) || row.values.length === 0) return row;
+
+            const nextValues = [...row.values];
+            const first = nextValues[0];
+            const lastIdx = nextValues.length - 1;
+            const span = Math.max(1, Math.abs(nextValues[lastIdx] - first), Math.abs(nextValues[lastIdx]));
+            const directionSign = signal.direction === 'higher' ? 1 : -1;
+            const positiveFactor = signal.touched ? 0.11 : 0;
+            const negativeFactor = signal.touched ? 0 : (weakAnswer ? 0.09 : 0.055);
+            const netFactor = positiveFactor - negativeFactor;
+            const change = span * netFactor * influence;
+
+            nextValues[lastIdx] = Number((nextValues[lastIdx] + directionSign * change).toFixed(2));
+            if (lastIdx > 0) {
+                nextValues[lastIdx - 1] = Number((nextValues[lastIdx - 1] + directionSign * change * 0.45).toFixed(2));
+            }
+
+            const delta = nextValues.length > 1 ? nextValues[lastIdx] - nextValues[0] : 0;
+            const improving = getMetricDirection(row.key || row.label || `series_${idx + 1}`) === 'higher'
+                ? nextValues[lastIdx] >= nextValues[0]
+                : nextValues[lastIdx] <= nextValues[0];
+
+            return {
+                ...row,
+                values: nextValues,
+                quarterly: aggregateQuarterly(nextValues),
+                delta,
+                improving
+            };
+        });
+    }, [
+        dynamicScopedMetricRows,
+        sectionOriginalMetricRows,
+        hasActiveQuestionProgress,
+        dynamicCockpitMetrics,
+        activeQuestion,
+        activeQuestionAnswerCorpus,
+        scoreBreakdown?.totalScore,
+        latestActiveQuestionAnswer
+    ]);
+
+    const sectionHasDataMetrics = sectionOriginalMetricRows.length > 0;
+
+    const displayedMetricRows = useMemo(() => sectionDynamicMetricRows, [sectionDynamicMetricRows]);
+
+    const displayedTimelineLabels = useMemo(() => {
+        const seriesLen = Math.max(...displayedMetricRows.map((row) => Array.isArray(row?.values) ? row.values.length : 0), 0);
+        if (seriesLen <= 0) return [];
+        if (seriesLen <= 12) return monthNames.slice(0, seriesLen);
+        return Array.from({ length: seriesLen }, (_, i) => `P${i + 1}`);
+    }, [displayedMetricRows]);
+
+    const displayedKpis = useMemo(() => displayedMetricRows.slice(0, 8).map((row) => ({
+        key: row.key,
+        label: row.label,
+        unit: row.unit,
+        current: row.values[row.values.length - 1] || 0,
+        delta: row.delta,
+        deltaPct: row.values.length > 1 && row.values[0] !== 0
+            ? ((row.values[row.values.length - 1] - row.values[0]) / Math.abs(row.values[0])) * 100
+            : 0,
+        isImproving: row.improving,
+        touched: false
+    })), [displayedMetricRows]);
+
+    const displayedUnitLegend = useMemo(() => {
+        const entries = Array.from(new Set(displayedMetricRows.map((row) => row.unit).filter(Boolean)));
+        return entries.map((unit) => ({
+            unit,
+            label: unitDisplayLabel(unit)
+        }));
+    }, [displayedMetricRows]);
 
     const decisionImpact = useMemo(() => {
         if (!Array.isArray(metricRows) || metricRows.length === 0) return null;
 
-        if (!hasCandidateProgress || !latestCandidateAnswer.trim()) {
-            const baselineEntries = metricRows
-                .map((row) => {
-                    const first = Number(row.values?.[0] || 0);
-                    const last = Number(row.values?.[row.values.length - 1] || 0);
-                    const diff = last - first;
-                    if (!Number.isFinite(diff) || Math.abs(diff) < 0.0001) return null;
-
-                    const direction = getMetricDirection(row.key);
-                    const isImprovement = direction === 'higher' ? diff > 0 : diff < 0;
-                    return {
-                        isImprovement,
-                        magnitude: Math.abs(diff),
-                        text: `${row.label}: ${diff >= 0 ? '+' : ''}${formatMetricValue(diff, row.unit)}`
-                    };
-                })
-                .filter(Boolean)
-                .sort((a, b) => b.magnitude - a.magnitude);
-
+        if (!hasActiveQuestionProgress) {
             return {
-                title: 'Case Metrics Overview',
-                improved: baselineEntries.filter((e) => e.isImprovement).slice(0, 4).map((e) => e.text),
-                worsened: baselineEntries.filter((e) => !e.isImprovement).slice(0, 4).map((e) => e.text),
+                title: 'LATEST ANSWER IMPACT',
+                improved: [],
+                worsened: [],
                 missed: [],
-                isBaseline: true
+                isBaseline: false,
+                isReset: true
             };
         }
 
@@ -946,18 +1378,46 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
             else worsened.push(entry);
         }
 
-        const missed = cockpitMetrics.filter((m) => !m.touched).slice(0, 3).map((m) => m.label);
+        const missed = dynamicCockpitMetrics.filter((m) => !m.touched).slice(0, 3).map((m) => m.label);
         return {
-            title: 'Latest Answer Impact',
+            title: 'LATEST ANSWER IMPACT',
             improved: improved.slice(0, 4),
             worsened: worsened.slice(0, 4),
             missed,
-            isBaseline: false
+            isBaseline: false,
+            isReset: false
         };
-    }, [latestCandidateAnswer, metricRows, dynamicMetricRows, cockpitMetrics, hasCandidateProgress]);
+    }, [metricRows, dynamicMetricRows, dynamicCockpitMetrics, hasActiveQuestionProgress, activeQuestionId]);
+
+    const sidebarImpactSeries = useMemo(() => {
+        if (!hasActiveQuestionProgress) return [];
+
+        const baseMap = Object.fromEntries(metricRows.map((m) => [m.key, m.values[m.values.length - 1] || 0]));
+        const ranked = dynamicMetricRows
+            .map((row) => {
+                const key = row.key;
+                const baseline = Number(baseMap[key] || 0);
+                const current = Number(row.values?.[row.values.length - 1] || 0);
+                const diff = current - baseline;
+                const touched = candidateTouchesMetric(row.label || row.key, activeQuestionAnswerCorpus);
+                return {
+                    ...row,
+                    diff,
+                    touched,
+                    magnitude: Math.abs(diff)
+                };
+            })
+            .filter((row) => Array.isArray(row.values) && row.values.length > 1)
+            .sort((a, b) => {
+                if (a.touched !== b.touched) return a.touched ? -1 : 1;
+                return b.magnitude - a.magnitude;
+            });
+
+        return ranked.slice(0, 3);
+    }, [hasActiveQuestionProgress, metricRows, dynamicMetricRows, activeQuestionAnswerCorpus]);
 
     const mockDrillEnabled = useMemo(() => normalizeMockDrillMode(caseStudy || {}), [caseStudy]);
-    const mockDrillLevers = useMemo(() => resolveMockDrillLevers(caseStudy || {}), [caseStudy]);
+    const mockDrillLevers = useMemo(() => resolveMockDrillLevers(caseStudy || {}, metricRows), [caseStudy, metricRows]);
 
     useEffect(() => {
         if (!mockDrillEnabled) {
@@ -984,7 +1444,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
         return applyMockDrillToMetricRows(metricRows, mockDrillLevers, simulationValues);
     }, [mockDrillEnabled, metricRows, mockDrillLevers, simulationValues]);
 
-    const simulationDisplayRows = simulationRows.length > 0 ? simulationRows : simulationPreviewRows;
+    const simulationDisplayRows = simulationPreviewRows;
 
     const simulationTimelineLabels = useMemo(() => {
         const seriesLen = Math.max(...simulationDisplayRows.map((row) => row.values.length), 0);
@@ -993,9 +1453,10 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
         return Array.from({ length: seriesLen }, (_, i) => `P${i + 1}`);
     }, [simulationDisplayRows]);
 
-    const simulationKpis = useMemo(() => simulationDisplayRows.slice(0, 8).map((row) => ({
+    const simulationKpis = useMemo(() => simulationDisplayRows.map((row) => ({
         key: row.key,
         label: row.label,
+        unit: row.unit,
         current: row.values[row.values.length - 1] || 0,
         delta: row.delta,
         deltaPct: row.values.length > 1 && row.values[0] !== 0 ? ((row.values[row.values.length - 1] - row.values[0]) / Math.abs(row.values[0])) * 100 : 0,
@@ -1019,83 +1480,6 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
         setCoachNote('Simulation executed. Use these impact signals in your answer.');
     };
 
-    const caseSections = useMemo(() => {
-        const deduped = [];
-        const seen = new Set();
-
-        const push = (section) => {
-            const key = String(section?.key || '').trim();
-            const label = String(section?.label || '').trim();
-            if (!key || !label) return;
-            const dedupeKey = `${label.toLowerCase()}::${key}`;
-            if (seen.has(dedupeKey)) return;
-            seen.add(dedupeKey);
-            deduped.push({ key, label, role: String(section?.role || 'other') });
-        };
-
-        if (Array.isArray(briefSections) && briefSections.length > 0) {
-            briefSections.forEach(push);
-            return deduped;
-        }
-
-        const rawSections = getParsedSectionsFromCase(caseStudy);
-        const llmSections = Array.isArray(rawSections?._sections) ? rawSections._sections : [];
-        llmSections.forEach((s, idx) => {
-            const content = String(s?.content || '').trim();
-            if (!content) return;
-            push({ key: `section_${idx}`, label: String(s?.heading || `Section ${idx + 1}`), role: String(s?.role || 'other') });
-        });
-
-        return deduped;
-    }, [briefSections, caseStudy]);
-
-    const handleSectionSelect = (sectionKey) => {
-        setActiveCaseSection(sectionKey);
-        setSectionError('');
-    };
-
-    useEffect(() => {
-        if (!['overview', 'data', 'simulation'].includes(activeCaseSection)) {
-            setActiveCaseSection('overview');
-        }
-    }, [activeCaseSection]);
-
-    useEffect(() => {
-        if (!caseStudy?.id || !Array.isArray(caseSections) || caseSections.length === 0) return;
-
-        const targets = caseSections
-            .map((s) => String(s?.key || '').trim())
-            .filter((k) => k.length > 0 && !sectionPayloads[k]);
-
-        if (targets.length === 0) return;
-
-        let cancelled = false;
-        const fetchAllSections = async () => {
-            setSectionLoadingKey('overview_all');
-            setSectionError('');
-            try {
-                const results = await Promise.all(targets.map(async (key) => {
-                    const res = await axios.get(`${API_BASE}/case-studies/${caseStudy.id}/brief-section/${key}`);
-                    return { key, section: res.data?.section || null, success: Boolean(res.data?.success && res.data?.section) };
-                }));
-
-                if (cancelled) return;
-
-                const nextPayloads = {};
-                for (const item of results) {
-                    if (item.success) nextPayloads[item.key] = item.section;
-                }
-                setSectionPayloads((prev) => ({ ...prev, ...nextPayloads }));
-            } catch (err) {
-                if (!cancelled) setSectionError(err.response?.data?.error || 'Failed to load section content.');
-            } finally {
-                if (!cancelled) setSectionLoadingKey('');
-            }
-        };
-
-        fetchAllSections();
-        return () => { cancelled = true; };
-    }, [caseStudy?.id, caseSections, sectionPayloads]);
 
     // ── Loading / Error screens ──────────────────────────────────────────────
     if (loading) return (
@@ -1128,30 +1512,31 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                 <div className="sidebar-case-header">
                     <div className="case-header-top">
                         <span className="case-tag-pill">CASE BRIEF</span>
-                        <span className="difficulty-pill difficulty-pill--medium">Medium</span>
                         <span className="time-pill">30 min</span>
                     </div>
                     <h2 className="case-title">Case Sections</h2>
                     <p className="case-industry">Navigate the full brief before responding</p>
                 </div>
 
-                <SidebarCard label="Case Flow" variant="accent">
-                    <div className="sidebar-section-nav" aria-label="Candidate case flow">
-                        <button
-                            className={`sidebar-section-btn ${activeCaseSection === 'overview' ? 'active' : ''}`}
-                            onClick={() => handleSectionSelect('overview')}
-                        >
-                            Overview
-                        </button>
-                        <button
-                            className={`sidebar-section-btn ${activeCaseSection === 'data' ? 'active' : ''}`}
-                            onClick={() => handleSectionSelect('data')}
-                        >
-                            Data & Metrics
-                        </button>
+                <SidebarCard label="Section Navigator">
+                    <div className="sidebar-section-nav" aria-label="Candidate section flow">
+                        {briefSections.map((s) => (
+                            <button
+                                key={s.id}
+                                type="button"
+                                className={`sidebar-section-btn ${activeCaseSection === s.id ? 'active' : ''}`}
+                                onClick={() => setActiveCaseSection(s.id)}
+                            >
+                                <span style={{ flex: 1, textAlign: 'left' }}>{s.heading || 'Untitled Section'}</span>
+                                {s.role && s.role !== 'other' && (
+                                    <span className={`role-pill role-pill--${s.role}`}>{s.role}</span>
+                                )}
+                            </button>
+                        ))}
                         {mockDrillEnabled && (
                             <button
                                 className={`sidebar-section-btn sidebar-section-btn--mock-drill ${activeCaseSection === 'simulation' ? 'active' : ''}`}
+                                style={{ marginTop: '8px', borderTop: '1px solid var(--border-subtle)', paddingTop: '12px' }}
                                 onClick={() => setActiveCaseSection('simulation')}
                             >
                                 Run Simulations
@@ -1177,7 +1562,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                                     title={q.text}
                                 >
                                     <span className="question-chip__index">Q{idx + 1}</span>
-                                    <span className="question-chip__text">{q.text}</span>
+                                    <span className="question-chip__text">{normalizeQuestionText(q.text)}</span>
                                 </button>
                             );
                         })}
@@ -1214,73 +1599,83 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                     </div>
                 </header>
 
-                {activeCaseSection === 'overview' && (
-                <section className="case-content-pane" aria-label="Overview content">
+                {activeSectionData && (
+                <section className="case-content-pane" aria-label={`${activeSectionData.heading} content`}>
                     <article className="main-section-card">
-                        <h3>Overview</h3>
-                        {sectionLoadingKey === 'overview_all' && (
-                            <p>Loading overview sections...</p>
-                        )}
-                        {sectionError && (
-                            <p>{sectionError}</p>
-                        )}
-
-                        {!sectionError && caseSections.length === 0 && (
-                            <p>No overview sections were found for this case study.</p>
-                        )}
-
-                        {!sectionError && caseSections.length > 0 && caseSections.map((section) => {
-                            const payload = sectionPayloads[section.key] || {};
-                            const title = String(payload.title || payload.heading || section.label || 'Section').trim();
-                            const content = String(payload.content || '').trim();
-                            const bullets = Array.isArray(payload.bullets)
-                                ? payload.bullets.map((b) => String(b || '').trim()).filter(Boolean)
-                                : [];
-                            const paragraphs = content
-                                ? content.split(/\n{2,}/).map((p) => String(p || '').trim()).filter(Boolean)
-                                : [];
-
-                            if (!title && paragraphs.length === 0 && bullets.length === 0) return null;
-
-                            return (
-                                <section key={section.key} style={{ marginBottom: '14px' }}>
-                                    <h4 className="brief-subheading" style={{ marginTop: 0 }}>{title}</h4>
-                                    {paragraphs.length > 0 && paragraphs.map((p, idx) => (
-                                        <p key={`${section.key}-p-${idx}`} style={{ whiteSpace: 'pre-wrap' }}>{p}</p>
-                                    ))}
-                                    {bullets.length > 0 && (
-                                        <ul>
-                                            {bullets.map((item, idx) => <li key={`${section.key}-b-${idx}`}>{item}</li>)}
-                                        </ul>
-                                    )}
-                                </section>
-                            );
-                        })}
+                        <h3 style={{ textTransform: 'uppercase', marginBottom: '16px', letterSpacing: '0.04em' }}>{activeSectionData.heading}</h3>
+                        <div style={{ whiteSpace: 'pre-wrap', lineHeight: '1.6', fontSize: '0.9rem', color: 'var(--text-primary)', marginBottom: '24px' }}>
+                            {activeSectionData.content}
+                        </div>
                     </article>
+
+                    {activeInlineSeries.length > 0 && !sectionHasDataMetrics && (
+                        <>
+                            <div style={{
+                                marginTop: '16px',
+                                padding: '12px 0 4px',
+                                fontSize: '0.72rem',
+                                fontWeight: 700,
+                                letterSpacing: '0.08em',
+                                color: 'var(--text-secondary)',
+                                textTransform: 'uppercase',
+                            }}>
+                                Data Visualisation
+                            </div>
+                            <section className="trend-strip" style={{ marginTop: '8px', flexWrap: 'wrap', gap: '12px' }}>
+                                {activeInlineSeries.map((series, si) => (
+                                    <MetricLineChart
+                                        key={`${activeSectionData.id}-series-${si}`}
+                                        label={series.groupLabel}
+                                        values={series.points.map((p) => p.value)}
+                                        xLabels={series.points.map((p) => p.label)}
+                                        unit="count"
+                                    />
+                                ))}
+                            </section>
+                        </>
+                    )}
                 </section>
                 )}
 
-                {activeCaseSection === 'data' && (
+                {sectionHasDataMetrics && displayedMetricRows.length > 0 && (
+                <section className="metric-legend-strip" aria-label="Units and indicator legend">
+                    <div className="metric-legend-group">
+                        <span className="metric-legend-title">Units</span>
+                        {displayedUnitLegend.map((entry) => (
+                            <span key={`unit-${entry.unit}`} className="metric-legend-chip">{entry.label}</span>
+                        ))}
+                    </div>
+                    <div className="metric-legend-group">
+                        <span className="metric-legend-title">Indicators</span>
+                        <span className="metric-legend-chip metric-legend-chip--good">Green = Improving</span>
+                        <span className="metric-legend-chip metric-legend-chip--bad">Red = Worsening</span>
+                        <span className="metric-legend-chip">Heatmap = Higher intensity means higher value</span>
+                    </div>
+                </section>
+                )}
+
+                {sectionHasDataMetrics && displayedMetricRows.length > 0 && (
                 <section className="kpi-rail" aria-label="Executive KPI rail">
-                    {staticKpis.slice(0, 8).map((metric) => (
+                    {displayedKpis.slice(0, 8).map((metric) => (
                         <article key={metric.key} className={`kpi-tile ${metric.isImproving ? 'up' : 'down'}`}>
                             <p className="kpi-tile__name">{metric.label}</p>
-                            <p className="kpi-tile__value">{formatMetricValue(metric.current, inferMetricUnit(metric.key, [metric.current]))}</p>
+                            <p className="kpi-tile__unit">{unitDisplayLabel(metric.unit)}</p>
+                            <p className="kpi-tile__value">{formatMetricValue(metric.current, metric.unit)}</p>
                             <p className={`kpi-tile__delta ${metric.delta >= 0 ? 'positive' : 'negative'}`}>
-                                {metric.delta >= 0 ? '+' : ''}{metric.delta.toFixed(2)} ({metric.deltaPct >= 0 ? '+' : ''}{metric.deltaPct.toFixed(1)}%)
+                                {metric.delta >= 0 ? '+' : '-'}{formatMetricValue(Math.abs(metric.delta), metric.unit)} ({metric.deltaPct >= 0 ? '+' : ''}{metric.deltaPct.toFixed(1)}%)
                             </p>
                         </article>
                     ))}
                 </section>
                 )}
 
-                {activeCaseSection === 'data' && (
+                {sectionHasDataMetrics && displayedMetricRows.length > 0 && (
                 <>
-                <section className="metrics-deep-dive">
+                <section className="metrics-deep-dive metrics-deep-dive--single">
                     <div className="table-card">
                         <div className="table-card__header">
-                            <h3>Monthly Metrics Breakdown</h3>
-                            <p>All parameters with units (INR, %, days, ratio), trend, and monthly values</p>
+                            <h3>Section Metrics Breakdown</h3>
+                            <p>{`Answer-driven changes for ${activeQuestion ? `Q${activeQuestion.index + 1}` : 'the current question'} including follow-up/counter-question responses`}</p>
                         </div>
                         <div className="metrics-table-wrap">
                             <table className="metrics-table">
@@ -1288,17 +1683,24 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                                     <tr>
                                         <th>Parameter</th>
                                         <th>Unit</th>
-                                        {timelineLabels.map((label) => <th key={label}>{label}</th>)}
+                                        {displayedTimelineLabels.map((label, idx) => <th key={`${label}-${idx}`}>{label}</th>)}
                                         <th>Trend</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {metricRows.map((row) => (
+                                    {displayedMetricRows.map((row) => (
                                         <tr key={row.key}>
                                             <td className="sticky-col">{row.label}</td>
-                                            <td>{row.unit.replace('_', ' ')}</td>
-                                            {row.values.map((val, idx) => <td key={`${row.key}-${idx}`}>{formatMetricValue(val, row.unit)}</td>)}
-                                            <td className={row.improving ? 'trend-positive' : 'trend-negative'}>{row.improving ? 'Improving' : 'Deteriorating'}</td>
+                                            <td>{unitDisplayLabel(row.unit)}</td>
+                                            {displayedTimelineLabels.map((_, idx) => {
+                                                const val = row.values[idx];
+                                                return (
+                                                    <td key={`${row.key}-${idx}`}>
+                                                        {val !== undefined ? formatMetricValue(val, row.unit) : '—'}
+                                                    </td>
+                                                );
+                                            })}
+                                            <td className={`trend-cell ${row.improving ? 'trend-positive' : 'trend-negative'}`}>{row.improving ? 'Improving' : 'Down'}</td>
                                         </tr>
                                     ))}
                 
@@ -1307,44 +1709,63 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                         </div>
                     </div>
 
-                    <div className="table-card">
-                        <div className="table-card__header">
-                            <h3>Quarterly Rollup</h3>
-                            <p>Quarterly average view derived from monthly values</p>
-                        </div>
-                        <div className="metrics-table-wrap">
-                            <table className="metrics-table quarterly-table">
-                                <thead>
-                                    <tr>
-                                        <th>Parameter</th>
-                                        <th>Q1</th>
-                                        <th>Q2</th>
-                                        <th>Direction</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {metricRows.map((row) => (
-                                        <tr key={`${row.key}-q`}>
-                                            <td className="sticky-col">{row.label}</td>
-                                            <td>{row.quarterly[0] !== undefined ? formatMetricValue(row.quarterly[0], row.unit) : '—'}</td>
-                                            <td>{row.quarterly[1] !== undefined ? formatMetricValue(row.quarterly[1], row.unit) : '—'}</td>
-                                            <td>{getMetricDirection(row.key) === 'higher' ? 'Higher is better' : 'Lower is better'}</td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
                 </section>
 
-                {chartSeries.length > 0 && (
+                <section className="metrics-deep-dive metrics-deep-dive--single">
+                    <div className="table-card">
+                        <div className="table-card__header">
+                            <h3>Metric Heatmap</h3>
+                            <p>Each row is a parameter; darker cells indicate larger values in that series.</p>
+                        </div>
+                        <div className="metrics-table-wrap">
+                            <div className="metric-heatmap-wrap">
+                                {displayedMetricRows.slice(0, 8).map((row) => {
+                                    const values = row.values.map(Number).filter(Number.isFinite);
+                                    const min = Math.min(...values);
+                                    const max = Math.max(...values);
+                                    const span = Math.max(0.0001, max - min);
+
+                                    return (
+                                        <div key={`heat-${row.key}`} className="metric-heatmap-row">
+                                            <div className="metric-heatmap-row__label">{row.label}</div>
+                                            <div className="metric-heatmap-cells">
+                                                {displayedTimelineLabels.map((label, idx) => {
+                                                    const value = values[idx];
+                                                    if (value === undefined) {
+                                                        return <div key={`heat-${row.key}-${idx}`} className="metric-heatmap-cell metric-heatmap-cell--empty">—</div>;
+                                                    }
+                                                    const normalized = (value - min) / span;
+                                                    const alpha = 0.16 + normalized * 0.78;
+                                                    return (
+                                                        <div
+                                                            key={`heat-${row.key}-${idx}`}
+                                                            className="metric-heatmap-cell"
+                                                            style={{ background: `rgba(31,111,235,${alpha.toFixed(3)})` }}
+                                                            title={`${row.label} · ${label}: ${formatMetricValue(value, row.unit)}`}
+                                                        >
+                                                            <span>{label}</span>
+                                                            <strong>{formatAxisTickValue(value, row.unit)}</strong>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    </div>
+
+                </section>
+
+                {displayedMetricRows.length > 0 && (
                     <section className="trend-strip">
-                        {metricRows.slice(0, 5).map((row) => (
+                        {displayedMetricRows.slice(0, 5).map((row) => (
                             <MetricLineChart
                                 key={row.key}
                                 label={row.label}
                                 values={row.values}
-                                xLabels={timelineLabels}
+                                xLabels={displayedTimelineLabels}
                                 unit={row.unit}
                             />
                         ))}
@@ -1365,7 +1786,10 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                                 <div className={`simulation-status-pill ${hasSimulationRunForActiveQuestion ? 'ready' : 'pending'}`}>
                                     {hasSimulationRunForActiveQuestion ? 'Simulation Executed' : 'Simulation Pending'}
                                 </div>
-                                <button className="theme-switch" onClick={() => setActiveCaseSection('data')}>
+                                <button className="theme-switch" onClick={() => {
+                                    const firstDataSection = briefSections.find((s) => isMetricsSection(s));
+                                    setActiveCaseSection(firstDataSection?.id || briefSections?.[0]?.id || 'overview');
+                                }}>
                                     Back To Data & Metrics
                                 </button>
                             </div>
@@ -1393,16 +1817,34 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                                                     <label key={lever.id} className="simulation-lever-row">
                                                         <div className="simulation-lever-header">
                                                             <span>{lever.label}</span>
-                                                            <span>{Number(simulationValues[lever.id] ?? lever.defaultValue ?? 0)}%</span>
+                                                            <div className="simulation-lever-value-wrap">
+                                                                <input
+                                                                    type="number"
+                                                                    className="simulation-lever-value-input"
+                                                                    min={lever.min}
+                                                                    max={lever.max}
+                                                                    step={1}
+                                                                    value={getLeverValue(lever, simulationValues)}
+                                                                    onChange={(event) => {
+                                                                        const v = clampLeverValue(event.target.value, lever);
+                                                                        setSimulationValues((prev) => ({ ...prev, [lever.id]: v }));
+                                                                    }}
+                                                                    onBlur={(event) => {
+                                                                        const v = clampLeverValue(event.target.value, lever);
+                                                                        setSimulationValues((prev) => ({ ...prev, [lever.id]: v }));
+                                                                    }}
+                                                                />
+                                                                <span className="simulation-lever-value-unit">%</span>
+                                                            </div>
                                                         </div>
                                                         <input
                                                             type="range"
                                                             min={lever.min}
                                                             max={lever.max}
-                                                            step={lever.step}
-                                                            value={Number(simulationValues[lever.id] ?? lever.defaultValue ?? 0)}
+                                                            step={1}
+                                                            value={getLeverValue(lever, simulationValues)}
                                                             onChange={(event) => {
-                                                                const v = Number(event.target.value);
+                                                                const v = clampLeverValue(event.target.value, lever);
                                                                 setSimulationValues((prev) => ({ ...prev, [lever.id]: v }));
                                                             }}
                                                         />
@@ -1439,9 +1881,10 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                                         {simulationKpis.map((metric) => (
                                             <article key={metric.key} className={`kpi-tile ${metric.isImproving ? 'up' : 'down'}`}>
                                                 <p className="kpi-tile__name">{metric.label}</p>
-                                                <p className="kpi-tile__value">{formatMetricValue(metric.current, inferMetricUnit(metric.key, [metric.current]))}</p>
+                                                <p className="kpi-tile__unit">{unitDisplayLabel(metric.unit)}</p>
+                                                <p className="kpi-tile__value">{formatMetricValue(metric.current, metric.unit)}</p>
                                                 <p className={`kpi-tile__delta ${metric.delta >= 0 ? 'positive' : 'negative'}`}>
-                                                    {metric.delta >= 0 ? '+' : ''}{metric.delta.toFixed(2)} ({metric.deltaPct >= 0 ? '+' : ''}{metric.deltaPct.toFixed(1)}%)
+                                                    {metric.delta >= 0 ? '+' : '-'}{formatMetricValue(Math.abs(metric.delta), metric.unit)} ({metric.deltaPct >= 0 ? '+' : ''}{metric.deltaPct.toFixed(1)}%)
                                                 </p>
                                             </article>
                                         ))}
@@ -1450,79 +1893,6 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                             </div>
                         </section>
 
-                        <section className="metrics-deep-dive">
-                            <div className="table-card">
-                                <div className="table-card__header">
-                                    <h3>Simulated Monthly Metrics</h3>
-                                    <p>Case-specific dynamic series after simulation execution.</p>
-                                </div>
-                                <div className="metrics-table-wrap">
-                                    <table className="metrics-table">
-                                        <thead>
-                                            <tr>
-                                                <th>Parameter</th>
-                                                <th>Unit</th>
-                                                {simulationTimelineLabels.map((label) => <th key={label}>{label}</th>)}
-                                                <th>Trend</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {simulationDisplayRows.map((row) => (
-                                                <tr key={row.key}>
-                                                    <td className="sticky-col">{row.label}</td>
-                                                    <td>{row.unit.replace('_', ' ')}</td>
-                                                    {row.values.map((val, idx) => <td key={`${row.key}-${idx}`}>{formatMetricValue(val, row.unit)}</td>)}
-                                                    <td className={row.improving ? 'trend-positive' : 'trend-negative'}>{row.improving ? 'Improving' : 'Deteriorating'}</td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-
-                            <div className="table-card">
-                                <div className="table-card__header">
-                                    <h3>Simulated Quarterly Rollup</h3>
-                                    <p>Quarterly summary based on this case's metric structure.</p>
-                                </div>
-                                <div className="metrics-table-wrap">
-                                    <table className="metrics-table quarterly-table">
-                                        <thead>
-                                            <tr>
-                                                <th>Parameter</th>
-                                                <th>Q1</th>
-                                                <th>Q2</th>
-                                                <th>Direction</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {simulationDisplayRows.map((row) => (
-                                                <tr key={`${row.key}-q`}>
-                                                    <td className="sticky-col">{row.label}</td>
-                                                    <td>{row.quarterly[0] !== undefined ? formatMetricValue(row.quarterly[0], row.unit) : '—'}</td>
-                                                    <td>{row.quarterly[1] !== undefined ? formatMetricValue(row.quarterly[1], row.unit) : '—'}</td>
-                                                    <td>{getMetricDirection(row.key) === 'higher' ? 'Higher is better' : 'Lower is better'}</td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </section>
-
-                        {simulationDisplayRows.length > 0 && (
-                            <section className="trend-strip">
-                                {simulationDisplayRows.slice(0, 5).map((row) => (
-                                    <MetricLineChart
-                                        key={row.key}
-                                        label={row.label}
-                                        values={row.values}
-                                        xLabels={simulationTimelineLabels}
-                                        unit={row.unit}
-                                    />
-                                ))}
-                            </section>
-                        )}
                     </>
                 )}
             </main>
@@ -1545,11 +1915,62 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                         </div>
                     </div>
 
+                    {decisionImpact && (
+                        <div className="impact-box" style={{ marginTop: '16px', background: 'var(--bg-layer-2)', padding: '12px', borderRadius: '8px', border: '1px solid var(--border-subtle)', fontSize: '0.85rem' }}>
+                            <p className="impact-box__title" style={{ textTransform: 'uppercase', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '12px', fontSize: '0.75rem', letterSpacing: '0.5px' }}>{decisionImpact.title}</p>
+                            
+                            {decisionImpact.isReset ? (
+                                <p style={{ color: 'var(--text-muted)' }}>Awaiting candidate response...</p>
+                            ) : (
+                                <>
+                                    {decisionImpact.improved.length > 0 && (
+                                        <div style={{ marginBottom: '12px' }}>
+                                            <p style={{ color: 'var(--trend-up)', fontWeight: 600, marginBottom: '4px' }}>Improved Signals</p>
+                                            <ul style={{ listStyleType: 'disc', paddingLeft: '20px', color: 'var(--text-primary)', margin: 0 }}>
+                                                {decisionImpact.improved.slice(0, 5).map((item, idx) => <li key={`impr-${idx}`} style={{ marginBottom: '2px', color: 'var(--text-primary)' }}>{item}</li>)}
+                                            </ul>
+                                        </div>
+                                    )}
+
+                                    {decisionImpact.worsened.length > 0 && (
+                                        <div style={{ marginBottom: '12px' }}>
+                                            <p style={{ color: 'var(--trend-down)', fontWeight: 600, marginBottom: '4px' }}>Worsened Signals</p>
+                                            <ul style={{ listStyleType: 'disc', paddingLeft: '20px', color: 'var(--text-primary)', margin: 0 }}>
+                                                {decisionImpact.worsened.slice(0, 5).map((item, idx) => <li key={`wors-${idx}`} style={{ marginBottom: '2px', color: 'var(--text-primary)' }}>{item}</li>)}
+                                            </ul>
+                                        </div>
+                                    )}
+
+                                    {!decisionImpact.isBaseline && decisionImpact.missed.length > 0 && (
+                                        <p style={{ color: 'var(--text-muted)', marginTop: '8px' }}>Missed metrics: {decisionImpact.missed.join(', ')}</p>
+                                    )}
+                                    
+                                    {!decisionImpact.isBaseline && decisionImpact.improved.length === 0 && decisionImpact.worsened.length === 0 && (
+                                        <p style={{ color: 'var(--text-muted)' }}>No measurable signal changes yet.</p>
+                                    )}
+
+                                    {sidebarImpactSeries.length > 0 && (
+                                        <div style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--border-subtle)' }}>
+                                            <p style={{ color: 'var(--text-secondary)', fontWeight: 600, fontSize: '0.72rem', letterSpacing: '0.04em', marginBottom: '8px' }}>
+                                                Q{(activeQuestion?.index ?? 0) + 1} VISUAL RESPONSE SIGNALS
+                                            </p>
+                                            <div style={{ display: 'grid', gap: '8px' }}>
+                                                {sidebarImpactSeries.map((row) => (
+                                                    <SparkBar key={`impact-${row.key}`} label={row.label} values={row.values} />
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                </>
+                            )}
+                        </div>
+                    )}
+
                     {activeQuestion && (
                         <div className="active-question-box">
                             <p className="active-question-box__label">Current problem statement</p>
                             <p className="active-question-box__title">Question {activeQuestion.index + 1} of {questionTracker.length}</p>
-                            <p className="active-question-box__text">{activeQuestion.text}</p>
+                            <p className="active-question-box__text">{normalizeQuestionText(activeQuestion.text)}</p>
                             <div className="active-question-box__actions">
                                 <button
                                     type="button"
@@ -1580,6 +2001,8 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                             </div>
                         </div>
                     )}
+
+                    
 
                 </header>
 

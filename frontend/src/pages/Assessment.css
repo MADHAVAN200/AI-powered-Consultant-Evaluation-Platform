@@ -501,6 +501,57 @@ body.assessment-lock { overflow: hidden; height: 100vh; }
     padding: 8px 10px;
 }
 
+.impact-popover-toggle {
+    margin-left: auto;
+    border: 1px solid var(--border-default);
+    border-radius: 6px;
+    background: var(--bg-card);
+    color: var(--text-primary);
+    font-size: 0.62rem;
+    font-weight: 700;
+    padding: 5px 8px;
+    cursor: pointer;
+}
+
+.impact-popover {
+    margin-top: 10px;
+    padding: 10px;
+    border-radius: 10px;
+    border: 1px solid var(--border-default);
+    background: var(--bg-subtle);
+}
+
+.impact-popover__title {
+    margin: 0 0 6px;
+    font-size: 0.66rem;
+    font-weight: 900;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+}
+
+.impact-popover__line {
+    margin: 0;
+    font-size: 0.69rem;
+}
+
+.impact-popover__line--good { color: #238636; }
+.impact-popover__line--bad { color: #b62324; }
+
+.impact-popover__list {
+    margin: 4px 0 8px;
+    padding-left: 16px;
+    font-size: 0.66rem;
+    line-height: 1.35;
+    color: var(--text-primary);
+}
+
+.impact-popover__missed {
+    margin: 0;
+    font-size: 0.66rem;
+    color: var(--text-secondary);
+}
+
 .strike-hud__label {
     font-size: 0.55rem;
     font-weight: 900;
@@ -1641,6 +1692,11 @@ body.assessment-lock { overflow: hidden; height: 100vh; }
     display: grid;
     grid-template-columns: 1.8fr 1fr;
     gap: 10px;
+    align-items: stretch;
+}
+
+.metrics-deep-dive--single {
+    grid-template-columns: 1fr;
 }
 
 .table-card {
@@ -1648,6 +1704,9 @@ body.assessment-lock { overflow: hidden; height: 100vh; }
     border-radius: 12px;
     background: var(--bg-card);
     overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
 }
 
 .table-card__header {
@@ -1668,25 +1727,62 @@ body.assessment-lock { overflow: hidden; height: 100vh; }
 }
 
 .metrics-table-wrap {
-    overflow: visible;
-    max-height: none;
+    overflow: auto;
+    max-height: 500px;
+    flex: 1;
 }
 
 .metrics-table {
     width: 100%;
     border-collapse: collapse;
-    min-width: 0;
+    min-width: 980px;
     table-layout: fixed;
 }
 
 .metrics-table th,
 .metrics-table td {
     border-bottom: 1px solid var(--border-default);
-    padding: 7px 8px;
+    padding: 9px 10px;
     font-size: 0.72rem;
     text-align: left;
     white-space: normal;
     word-break: break-word;
+    vertical-align: middle;
+}
+
+.metrics-table tbody tr:nth-child(even) {
+    background: color-mix(in srgb, var(--bg-subtle) 80%, transparent);
+}
+
+.metrics-table tbody tr:hover {
+    background: color-mix(in srgb, var(--accent-primary) 8%, var(--bg-subtle));
+}
+
+.metrics-table th:first-child,
+.metrics-table td:first-child {
+    width: 24%;
+    min-width: 150px;
+    white-space: normal;
+    word-break: keep-all;
+}
+
+.metrics-table th:not(:first-child),
+.metrics-table td:not(:first-child) {
+    font-variant-numeric: tabular-nums;
+}
+
+.metrics-table td:not(:first-child) {
+    text-align: right;
+}
+
+.metrics-table td:last-child,
+.metrics-table th:last-child {
+    text-align: left;
+}
+
+.metrics-table .trend-cell {
+    white-space: nowrap;
+    word-break: normal;
 }
 
 .metrics-table th {
@@ -1695,15 +1791,82 @@ body.assessment-lock { overflow: hidden; height: 100vh; }
     font-weight: 800;
     text-transform: uppercase;
     letter-spacing: 0.04em;
+    position: sticky;
+    top: 0;
+    z-index: 3;
 }
 
 .metrics-table .sticky-col {
     background: var(--bg-card);
     font-weight: 700;
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    box-shadow: 1px 0 0 var(--border-default);
+}
+
+.metrics-table thead .sticky-col {
+    z-index: 4;
+}
+
+.quarterly-table th:first-child,
+.quarterly-table td:first-child {
+    width: 36%;
+    min-width: 180px;
 }
 
 .trend-positive { color: #238636; font-weight: 700; }
 .trend-negative { color: #b62324; font-weight: 700; }
+
+.metric-legend-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.metric-legend-group {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.metric-legend-title {
+    font-size: 0.66rem;
+    font-weight: 800;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.metric-legend-chip {
+    border: 1px solid var(--border-default);
+    border-radius: 999px;
+    padding: 3px 8px;
+    font-size: 0.64rem;
+    color: var(--text-primary);
+    background: var(--bg-subtle);
+}
+
+.metric-legend-chip--good {
+    border-color: #238636;
+    color: #238636;
+}
+
+.metric-legend-chip--bad {
+    border-color: #b62324;
+    color: #b62324;
+}
+
+.kpi-tile__unit {
+    margin: 2px 0 0;
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-secondary);
+    font-weight: 700;
+}
 
 .trend-strip {
     display: grid;
@@ -1739,6 +1902,7 @@ body.assessment-lock { overflow: hidden; height: 100vh; }
     letter-spacing: 0.06em;
 }
 
+
 .line-chart-svg {
     width: 100%;
     height: 170px;
@@ -1773,6 +1937,112 @@ body.assessment-lock { overflow: hidden; height: 100vh; }
     fill: var(--text-primary);
     font-size: 9px;
     font-weight: 700;
+}
+
+.metric-heatmap-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+}
+
+.metric-heatmap-row {
+    display: grid;
+    grid-template-columns: minmax(110px, 150px) minmax(0, 1fr);
+    gap: 8px;
+    align-items: center;
+}
+
+.metric-heatmap-row__label {
+    font-size: 0.68rem;
+    color: var(--text-primary);
+    font-weight: 700;
+}
+
+.metric-heatmap-cells {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(60px, 1fr));
+    gap: 5px;
+}
+
+.metric-heatmap-cell {
+    min-height: 48px;
+    border-radius: 8px;
+    padding: 5px 6px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.metric-heatmap-cell span {
+    font-size: 0.58rem;
+    color: rgba(255, 255, 255, 0.92);
+}
+
+.metric-heatmap-cell strong {
+    font-size: 0.62rem;
+    color: #fff;
+    font-weight: 800;
+}
+
+.metric-heatmap-cell--empty {
+    background: var(--bg-subtle);
+    border: 1px dashed var(--border-default);
+    color: var(--text-secondary);
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+}
+
+.circular-insights-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    padding: 10px;
+}
+
+.circular-insight-card {
+    border: 1px solid var(--border-default);
+    border-radius: 10px;
+    background: var(--bg-subtle);
+    padding: 10px;
+    text-align: center;
+}
+
+.circular-insight-ring {
+    width: 78px;
+    height: 78px;
+    border-radius: 50%;
+    margin: 0 auto 8px;
+    display: grid;
+    place-items: center;
+}
+
+.circular-insight-inner {
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    background: var(--bg-card);
+    display: grid;
+    place-items: center;
+    color: var(--text-primary);
+    font-size: 0.75rem;
+    font-weight: 900;
+}
+
+.circular-insight-label {
+    font-size: 0.67rem;
+    font-weight: 800;
+    color: var(--text-primary);
+    margin: 0 0 4px;
+}
+
+.circular-insight-detail {
+    font-size: 0.6rem;
+    color: var(--text-secondary);
+    margin: 0;
+    line-height: 1.35;
 }
 
 .simulation-hero {
@@ -1946,9 +2216,41 @@ body.assessment-lock { overflow: hidden; height: 100vh; }
 .simulation-lever-header {
     display: flex;
     justify-content: space-between;
+    align-items: center;
     font-size: 0.76rem;
     font-weight: 700;
     color: var(--text-primary);
+}
+
+.simulation-lever-value-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.simulation-lever-value-input {
+    width: 62px;
+    height: 28px;
+    padding: 2px 6px;
+    border: 1px solid var(--border-default);
+    border-radius: 6px;
+    background: var(--bg-subtle);
+    color: var(--text-primary);
+    font-size: 0.74rem;
+    font-weight: 700;
+    text-align: right;
+}
+
+.simulation-lever-value-input:focus {
+    outline: none;
+    border-color: #1f6feb;
+    box-shadow: 0 0 0 2px rgba(31, 111, 235, 0.16);
+}
+
+.simulation-lever-value-unit {
+    font-size: 0.72rem;
+    font-weight: 800;
+    color: var(--text-secondary);
 }
 
 .simulation-controls-actions {
