@@ -1,5 +1,7 @@
-import json
 import os
+os.environ["ANONYMIZED_TELEMETRY"] = "false"
+
+import json
 import re
 from datetime import datetime, timezone
 from hashlib import sha1
@@ -36,14 +38,14 @@ def _load_env_file(path: Path) -> None:
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 _load_env_file(BACKEND_DIR / ".env")
 
-# Suppress Chroma telemetry calls that can fail noisily in some local environments.
-os.environ.setdefault("ANONYMIZED_TELEMETRY", "FALSE")
+# Default logs to a directory outside the service source to avoid reload loops during dev.
+DEFAULT_LOG_DIR = str((BACKEND_DIR / "rag_logs").resolve())
+RAG_LOG_PATH = os.getenv("RAG_LOG_PATH", str(Path(DEFAULT_LOG_DIR) / "retrieval_logs.jsonl"))
 
 RAG_EMBEDDING_MODEL = os.getenv("RAG_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 GROQ_MODEL = os.getenv("RAG_GROQ_MODEL", "llama-3.3-70b-versatile")
 CHROMA_COLLECTION = os.getenv("RAG_CHROMA_COLLECTION", "case_chunks")
 CHROMA_PERSIST_DIR = os.getenv("RAG_CHROMA_PERSIST_DIR", str((Path(__file__).resolve().parent / ".chroma").resolve()))
-RAG_LOG_PATH = os.getenv("RAG_LOG_PATH", str((Path(__file__).resolve().parent / "logs" / "retrieval_logs.jsonl").resolve()))
 RAG_DEBUG_LOGS = str(os.getenv("RAG_DEBUG_LOGS", "")).strip().lower() in {"1", "true", "yes", "on"}
 
 embeddings = HuggingFaceEmbeddings(model_name=RAG_EMBEDDING_MODEL)

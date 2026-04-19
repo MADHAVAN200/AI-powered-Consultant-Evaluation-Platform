@@ -36,12 +36,17 @@ def main() -> None:
     health_url = f"http://127.0.0.1:{port}/health"
 
     if _is_port_open("127.0.0.1", port):
-        if _health_ok(health_url):
-            print(f"[RAG] Existing service already running on {port}. Reusing it.")
-            # Keep process alive so root concurrently does not terminate other services.
-            threading.Event().wait()
-            return
-        raise RuntimeError(f"Port {port} is in use by a non-RAG process")
+        # Retry health check a few times in case the service is just starting up.
+        import time
+        for i in range(5):
+            if _health_ok(health_url):
+                print(f"[RAG] Existing service already running on {port}. Reusing it.")
+                # Keep process alive so root concurrently does not terminate other services.
+                threading.Event().wait()
+                return
+            time.sleep(0.5)
+        
+        print(f"[RAG] Port {port} is in use but health check failed. Attempting to start uvicorn anyway...")
 
     uvicorn.run("app:app", host=host, port=port, reload=False)
 
