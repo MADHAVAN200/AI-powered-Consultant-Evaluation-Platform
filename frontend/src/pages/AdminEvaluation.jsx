@@ -30,6 +30,56 @@ const extractProblemQuestions = (text = '') => {
         .filter((q) => q.length > 8);
 };
 
+/**
+ * extractInlineSeries(text)
+ * Scans section content for "bullet label: number unit" patterns.
+ * Groups consecutive such lines together as a named data series.
+ * Returns: [ { groupLabel, points: [{label, value}], unit } ]
+ */
+const extractInlineSeries = (text = '') => {
+    const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+    const groups = [];
+    let currentGroup = null;
+    let pendingLabel = '';
+
+    for (const line of lines) {
+        // Strip leading bullet/dash chars
+        const stripped = line.replace(/^[•\-\*]\s*/, '').trim();
+
+        // Match "Label: number optional_unit" e.g. "January: 26 Lakhs" or "Revenue: 1.2 Cr"
+        const kvMatch = stripped.match(/^([^:]{1,60}):\s*([-+]?\d[\d,.]*(?:\.\d+)?)\s*([A-Za-z%/]*)\s*$/);
+        if (kvMatch) {
+            const pointLabel = kvMatch[1].trim();
+            const value = parseFloat(kvMatch[2].replace(/,/g, ''));
+            if (Number.isFinite(value)) {
+                if (!currentGroup) {
+                    currentGroup = { groupLabel: pendingLabel || 'Series', points: [] };
+                    groups.push(currentGroup);
+                }
+                currentGroup.points.push({ label: pointLabel, value });
+                continue;
+            }
+        }
+
+        // Non-numeric line: flush group if it has < 2 points, reset pending label
+        if (currentGroup) {
+            if (currentGroup.points.length < 2) groups.pop();
+            currentGroup = null;
+        }
+        // Use bold subheadings / short lines as group labels for the NEXT series
+        if (stripped.length > 0 && stripped.length < 60 && !stripped.includes('.') && stripped.endsWith(':')) {
+            pendingLabel = stripped.slice(0, -1).trim();
+        } else if (stripped.length > 0 && stripped.length < 60) {
+            pendingLabel = stripped;
+        }
+    }
+
+    // Flush final group
+    if (currentGroup && currentGroup.points.length < 2) groups.pop();
+
+    return groups.filter((g) => g.points.length >= 2);
+};
+
 const isMetricsSection = (section) => {
     if (!section || typeof section !== 'object') return false;
     const heading = String(section.heading || '').toLowerCase();
@@ -399,6 +449,19 @@ const normalizeCaseDetail = (detail) => {
     };
 };
 
+const getCaseModeMeta = (source = {}) => {
+    const parsed = (source?.parsedSections && typeof source.parsedSections === 'object')
+        ? source.parsedSections
+        : ((source?.parsed_sections && typeof source.parsed_sections === 'object') ? source.parsed_sections : {});
+
+    const modeRaw = parsed?._caseMode || source?.case_mode || source?.caseMode || 'chat_only';
+    const mode = String(modeRaw).toLowerCase().replace(/[\s-]+/g, '_');
+    if (mode === 'mock_drill_chat') {
+        return { mode, label: 'Mock Drill + Chat' };
+    }
+    return { mode: 'chat_only', label: 'Chat Only' };
+};
+
 const AdminEvaluation = () => {
     const [importingPdf, setImportingPdf] = useState(false);
     const [savingCase, setSavingCase] = useState(false);
@@ -426,6 +489,8 @@ const AdminEvaluation = () => {
     const [metricsEditorSectionId, setMetricsEditorSectionId] = useState('');
     const [assessmentMode, setAssessmentMode] = useState('chat_only');
     const [simulationConfigText, setSimulationConfigText] = useState('');
+    const [selectedCaseDetail, setSelectedCaseDetail] = useState(null);
+    const [loadingCaseDetail, setLoadingCaseDetail] = useState(false);
 
     const fetchCaseStudies = async () => {
         try {
@@ -491,28 +556,85 @@ const AdminEvaluation = () => {
         }
     };
 
+    const handleCreateManualCase = () => {
+        setSaveError('');
+        setSaveSuccess(false);
+        setEditingCaseId(null);
+
+        const manualDraft = {
+            id: null,
+            title: '',
+            industry: '',
+            context: '',
+            problemStatement: '',
+            initialPrompt: '',
+            thresholdPassingScore: 0.6,
+            financialData: {},
+            rawContent: '',
+            parsedSections: {
+                _sections: [
+                    { heading: 'Overview', content: '', role: 'context' }
+                ],
+                _problemQuestions: [],
+                _numericSeries: {},
+                _caseMode: 'chat_only',
+                _mockDrill: {
+                    enabled: false,
+                    levers: []
+                }
+            }
+        };
+
+        setPdfDraft(manualDraft);
+        setPdfDraftMeta({
+            fileName: 'Manual Case Draft',
+            pages: '-',
+            sectionsDiscovered: 1,
+            numericSeriesFound: 0,
+            llmExtracted: false
+        });
+        setCaseTitle('');
+        setCaseIndustry('');
+        setThresholdPassingScore(0.6);
+
+        const draftSections = buildSectionsFromDraft(manualDraft);
+        setSections(draftSections);
+        setActiveSectionId(draftSections[0]?.id || 'overview');
+        setAssessmentMode('chat_only');
+        setSimulationConfigText('');
+    };
+
     const activeSection = useMemo(
         () => sections.find((s) => s.id === activeSectionId) || null,
         [sections, activeSectionId]
     );
 
     const questionList = useMemo(() => {
-        // ── Priority 1: LLM-extracted questions ─────────────────────────────
+        // Read directly from the content of problem/questions sections that are
+        // being displayed — ensures sidebar always reflects what the user sees.
+        const problemSections = sections.filter((s) =>
+            s.role === 'problem' ||
+            /question|problem|statement|challenge|task|objective|deliverable/i.test(String(s.heading || ''))
+        );
+
+        const found = [];
+        for (const sec of problemSections) {
+            const lines = String(sec.content || '').split('\n').map((l) => l.trim()).filter(Boolean);
+            for (const line of lines) {
+                // Match numbered items: "1. text" or "1) text" (but NOT "1.2" decimal numbers)
+                const m = line.replace(/^[•\-\*]\s*/, '').match(/^(\d+)[.)\s]\s*(.{8,})$/);
+                if (m) found.push(m[2].trim());
+            }
+        }
+        if (found.length > 0) return found;
+
+        // Fallback: use backend-extracted questions
         const parsedQuestions = Array.isArray(pdfDraft?.parsedSections?._problemQuestions)
             ? pdfDraft.parsedSections._problemQuestions.map((q) => String(q || '').trim()).filter((q) => q.length > 8)
             : [];
         if (parsedQuestions.length > 0) return parsedQuestions;
 
-        // ── Priority 2: Scan problem-role sections ───────────────────────────
-        const problemSection = sections.find((s) => s.role === 'problem')
-            || sections.find((s) => /problem|question|objective|task|deliverable/i.test(String(s.heading || '')))
-            || null;
-        if (problemSection) {
-            const fromSection = extractProblemQuestions(problemSection.content || '');
-            if (fromSection.length > 0) return fromSection;
-        }
-
-        // ── Priority 3: Scan all section content ─────────────────────────────
+        // Last resort: scan all section content
         const allContent = sections.map((s) => s.content || '').join('\n');
         return extractProblemQuestions(allContent).slice(0, 8);
     }, [sections, pdfDraft]);
@@ -585,26 +707,50 @@ const AdminEvaluation = () => {
         return isMetricsSection(activeSection);
     }, [activeSection, activeSectionId]);
 
+    const activeInlineSeries = useMemo(() => {
+        return extractInlineSeries(activeSection?.content || '');
+    }, [activeSection]);
+
+    const activeInlineMetricRows = useMemo(() => {
+        return (activeInlineSeries || []).map((series, idx) => {
+            const values = (series?.points || []).map((p) => Number(p?.value)).filter(Number.isFinite);
+            const keySeed = series?.groupLabel || `series_${idx + 1}`;
+            const key = toSectionKey(keySeed) || `series_${idx + 1}`;
+            const delta = values.length > 1 ? values[values.length - 1] - values[0] : 0;
+            const improving = values.length > 1 ? values[values.length - 1] >= values[0] : true;
+            return {
+                key,
+                label: String(series?.groupLabel || `Series ${idx + 1}`),
+                unit: inferMetricUnit(key, values),
+                values,
+                quarterly: aggregateQuarterly(values),
+                delta,
+                improving
+            };
+        }).filter((row) => Array.isArray(row.values) && row.values.length > 0);
+    }, [activeInlineSeries]);
+
     const scopedMetricRows = useMemo(() => {
-        if (!showMetricsPreview) return [];
-        if (activeSectionId === METRICS_SECTION_ID || !activeSection) return metricRows;
-        return metricRows.filter((row) => metricBelongsToSection(row, activeSection));
-    }, [showMetricsPreview, activeSectionId, activeSection, metricRows]);
+        // Return metrics that belong to the active section (or all metrics if no active section)
+        if (!activeSection) return metricRows;
+        const scoped = metricRows.filter((row) => metricBelongsToSection(row, activeSection));
+        // Fallback for sections where numeric data exists only as inline series in content.
+        if (scoped.length > 0) return scoped;
+        return activeInlineMetricRows;
+    }, [activeSection, metricRows, activeInlineMetricRows]);
 
     const scopedMetricKeys = useMemo(() => new Set(scopedMetricRows.map((r) => r.key)), [scopedMetricRows]);
 
     useEffect(() => {
-        if (!showMetricsPreview) return;
         if (metricsEditorSectionId === activeSectionId) return;
         setMetricsEditorText(buildMetricsEditorText(scopedMetricRows));
         setMetricsEditorSectionId(activeSectionId);
-    }, [showMetricsPreview, scopedMetricRows, activeSectionId, metricsEditorSectionId]);
+    }, [scopedMetricRows, activeSectionId, metricsEditorSectionId]);
 
     const editedMetricRows = useMemo(() => {
-        if (!showMetricsPreview) return [];
         const parsed = parseMetricsEditorText(metricsEditorText);
         return parsed.length > 0 ? parsed : scopedMetricRows;
-    }, [showMetricsPreview, metricsEditorText, scopedMetricRows]);
+    }, [metricsEditorText, scopedMetricRows]);
 
     const editedMetricKpis = useMemo(() => editedMetricRows.slice(0, 8).map((row) => {
         const base = Number(row.values[0] || 0);
@@ -628,6 +774,61 @@ const AdminEvaluation = () => {
         return Array.from({ length: seriesLen }, (_, i) => `P${i + 1}`);
     }, [editedMetricRows]);
 
+    const editedUnitLegend = useMemo(() => {
+        const entries = Array.from(new Set(editedMetricRows.map((row) => row.unit).filter(Boolean)));
+        return entries.map((unit) => ({ unit, label: unitDisplayLabel(unit) }));
+    }, [editedMetricRows]);
+
+    const drawerSections = useMemo(() => {
+        if (!selectedCaseDetail) return [];
+        return buildSectionsFromDraft(selectedCaseDetail);
+    }, [selectedCaseDetail]);
+
+    const drawerMetricRows = useMemo(() => {
+        if (!selectedCaseDetail) return [];
+
+        const numericFromDraft = selectedCaseDetail.financialData && typeof selectedCaseDetail.financialData === 'object'
+            ? selectedCaseDetail.financialData
+            : {};
+
+        const numericFromParsed = (selectedCaseDetail.parsedSections && typeof selectedCaseDetail.parsedSections._numericSeries === 'object')
+            ? Object.fromEntries(
+                Object.entries(selectedCaseDetail.parsedSections._numericSeries).map(([k, v]) => {
+                    const values = Array.isArray(v?.values) ? v.values : [];
+                    return [k, values];
+                })
+            )
+            : {};
+
+        const merged = { ...numericFromParsed, ...numericFromDraft };
+
+        return Object.entries(merged)
+            .filter(([, v]) => Array.isArray(v) && v.length > 1)
+            .map(([key, values]) => {
+                const nums = values.map(Number).filter(Number.isFinite);
+                const unit = inferMetricUnit(key, nums);
+                const delta = nums.length > 1 ? nums[nums.length - 1] - nums[0] : 0;
+                const improving = nums.length > 1
+                    ? (getMetricDirection(key) === 'higher' ? nums[nums.length - 1] >= nums[0] : nums[nums.length - 1] <= nums[0])
+                    : true;
+                return {
+                    key,
+                    label: prettifyLabel(key).replace(/\b\w/g, (c) => c.toUpperCase()),
+                    unit,
+                    values: nums,
+                    delta,
+                    improving
+                };
+            });
+    }, [selectedCaseDetail]);
+
+    const drawerTimelineLabels = useMemo(() => {
+        const seriesLen = Math.max(...drawerMetricRows.map((row) => row.values.length), 0);
+        if (seriesLen <= 0) return [];
+        if (seriesLen <= 12) return monthNames.slice(0, seriesLen);
+        return Array.from({ length: seriesLen }, (_, i) => `P${i + 1}`);
+    }, [drawerMetricRows]);
+
     const handleMetricsEditorChange = (value) => {
         setMetricsEditorText(value);
 
@@ -644,15 +845,11 @@ const AdminEvaluation = () => {
                     : {})
             };
 
-            if (activeSectionId === METRICS_SECTION_ID) {
-                Object.keys(nextFinancial).forEach((k) => { delete nextFinancial[k]; });
-                Object.keys(nextNumericSeries).forEach((k) => { delete nextNumericSeries[k]; });
-            } else {
-                scopedMetricKeys.forEach((k) => {
-                    delete nextFinancial[k];
-                    delete nextNumericSeries[k];
-                });
-            }
+            // Wipe the keys currently in scope, then replace with edited values
+            scopedMetricKeys.forEach((k) => {
+                delete nextFinancial[k];
+                delete nextNumericSeries[k];
+            });
 
             parsedRows.forEach((row) => {
                 nextFinancial[row.key] = row.values;
@@ -674,7 +871,7 @@ const AdminEvaluation = () => {
     };
 
     const updateActiveSection = (patch) => {
-        if (!activeSection || showMetricsPreview) return;
+        if (!activeSection) return;
         setSections((prev) => prev.map((s) => (s.id === activeSection.id ? { ...s, ...patch } : s)));
     };
 
@@ -686,7 +883,7 @@ const AdminEvaluation = () => {
     };
 
     const deleteActiveSection = () => {
-        if (!activeSection || showMetricsPreview) return;
+        if (!activeSection) return;
         const nextSections = sections.filter((s) => s.id !== activeSection.id);
         setSections(nextSections);
         setActiveSectionId(nextSections[0]?.id || '');
@@ -740,6 +937,21 @@ const AdminEvaluation = () => {
             await fetchCaseStudies();
         } catch (e) {
             setSaveError('Failed to delete case study.');
+        }
+    };
+
+    const handleOpenCaseDetail = async (caseId) => {
+        setLoadingCaseDetail(true);
+        try {
+            const res = await axios.get(`${API_BASE}/admin/case-studies/${caseId}/detail`);
+            if (res.data?.success && res.data?.detail) {
+                const detail = normalizeCaseDetail(res.data.detail);
+                setSelectedCaseDetail(detail);
+            }
+        } catch {
+            setSelectedCaseDetail(null);
+        } finally {
+            setLoadingCaseDetail(false);
         }
     };
 
@@ -872,7 +1084,7 @@ const AdminEvaluation = () => {
                     <div className="sidebar-case-header">
                         <div className="case-header-top">
                             <span className="case-tag-pill">CASE PREVIEW</span>
-                            <span className="difficulty-pill difficulty-pill--medium">Admin Mode</span>
+                            <span className="case-chip">ADMIN MODE</span>
                         </div>
                         <h2 className="case-title">Draft Outline</h2>
                         <p className="case-industry">Review and finalize content</p>
@@ -896,13 +1108,6 @@ const AdminEvaluation = () => {
                                     )}
                                 </button>
                             ))}
-                            <button
-                                type="button"
-                                className={`sidebar-section-btn ${activeSectionId === METRICS_SECTION_ID ? 'active' : ''}`}
-                                onClick={() => setActiveSectionId(METRICS_SECTION_ID)}
-                            >
-                                Data & Metrics
-                            </button>
                             <button type="button" className="sidebar-section-btn sidebar-section-btn--add" onClick={addSection}>+ Add Section</button>
                         </div>
                     </div>
@@ -919,7 +1124,8 @@ const AdminEvaluation = () => {
                                             key={idx}
                                             style={{ fontSize: '0.72rem', marginBottom: '10px', color: 'var(--text-secondary)', lineHeight: '1.5' }}
                                         >
-                                            {q}
+                                            {/* Strip leading ordinal prefix (e.g. "1. " "1) " "1: ") so <ol> is the only number */}
+                                            {String(q).replace(/^\d+[.):\s]+\s*/, '').trim()}
                                         </li>
                                     ))}
                                 </ol>
@@ -1003,132 +1209,8 @@ const AdminEvaluation = () => {
                         </div>
                     </header>
 
-                    {showMetricsPreview && (
-                        <section className="case-content-pane" style={{ marginTop: '20px' }}>
-                            {assessmentMode === 'mock_drill_chat' && (
-                                <article className="main-section-card" style={{ marginBottom: '12px' }}>
-                                    <h3 style={{ marginBottom: '8px' }}>Mock Drill Config</h3>
-                                    <p className="hint-line" style={{ marginTop: 0, marginBottom: '8px' }}>
-                                        Define simulation levers as: group|label|metric_key|min|max|step|default
-                                    </p>
-                                    <textarea
-                                        style={{ width: '100%', minHeight: '130px', fontSize: '0.8rem', lineHeight: '1.5', background: 'var(--bg-subtle)', border: '1px dashed var(--border-default)', color: 'var(--text-primary)', padding: '12px', resize: 'vertical' }}
-                                        value={simulationConfigText}
-                                        onChange={(e) => setSimulationConfigText(e.target.value)}
-                                        placeholder={'Financial|Price Increase|total_revenue|-20|20|5|0\nOperations|Lead Time Compression|average_lead_time|-30|10|5|0'}
-                                    />
-                                </article>
-                            )}
-
-                            {editedMetricRows.length > 0 ? (
-                                <>
-                                    <article className="main-section-card" style={{ marginBottom: '12px' }}>
-                                        <h3 style={{ marginBottom: '8px' }}>Metrics Editor</h3>
-                                        <p className="hint-line" style={{ marginTop: 0, marginBottom: '8px' }}>
-                                            Edit metrics as: metric_key: value1, value2, value3. Visualizations update instantly.
-                                        </p>
-                                        <textarea
-                                            style={{ width: '100%', minHeight: '180px', fontSize: '0.82rem', lineHeight: '1.55', background: 'var(--bg-subtle)', border: '1px dashed var(--border-default)', color: 'var(--text-primary)', padding: '12px', resize: 'vertical' }}
-                                            value={metricsEditorText}
-                                            onChange={(e) => handleMetricsEditorChange(e.target.value)}
-                                            placeholder="revenue_cr: 1.2, 1.3, 1.4\nnet_profit_l: 12, 10, 8"
-                                        />
-                                    </article>
-
-                                    <section className="kpi-rail" aria-label="Case metric KPI rail">
-                                        {editedMetricKpis.map((metric) => (
-                                            <article key={metric.key} className={`kpi-tile ${metric.isImproving ? 'up' : 'down'}`}>
-                                                <p className="kpi-tile__name">{metric.label}</p>
-                                                <p className="kpi-tile__value">{formatMetricValue(metric.current, metric.unit)}</p>
-                                                <p className={`kpi-tile__delta ${metric.delta >= 0 ? 'positive' : 'negative'}`}>
-                                                    {metric.delta >= 0 ? '+' : ''}{metric.delta.toFixed(2)} ({metric.deltaPct >= 0 ? '+' : ''}{metric.deltaPct.toFixed(1)}%)
-                                                </p>
-                                            </article>
-                                        ))}
-                                    </section>
-
-                                    <section className="metrics-deep-dive" style={{ marginTop: '12px' }}>
-                                        <div className="table-card">
-                                            <div className="table-card__header">
-                                                <h3>Monthly Metrics Breakdown</h3>
-                                                <p>Admin preview of all detected case data points with units and trend.</p>
-                                            </div>
-                                            <div className="metrics-table-wrap">
-                                                <table className="metrics-table">
-                                                    <thead>
-                                                        <tr>
-                                                            <th>Parameter</th>
-                                                            <th>Unit</th>
-                                                            {editedTimelineLabels.map((label) => <th key={label}>{label}</th>)}
-                                                            <th>Trend</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                        {editedMetricRows.map((row) => (
-                                                            <tr key={row.key}>
-                                                                <td className="sticky-col">{row.label}</td>
-                                                                <td>{row.unit.replace('_', ' ')}</td>
-                                                                {row.values.map((val, idx) => <td key={`${row.key}-${idx}`}>{formatMetricValue(val, row.unit)}</td>)}
-                                                                <td className={row.improving ? 'trend-positive' : 'trend-negative'}>{row.improving ? 'Improving' : 'Deteriorating'}</td>
-                                                            </tr>
-                                                        ))}
-                                                    </tbody>
-                                                </table>
-                                            </div>
-                                        </div>
-
-                                        <div className="table-card">
-                                            <div className="table-card__header">
-                                                <h3>Quarterly Rollup</h3>
-                                                <p>Quarterly average view to validate directional case trajectory.</p>
-                                            </div>
-                                            <div className="metrics-table-wrap">
-                                                <table className="metrics-table quarterly-table">
-                                                    <thead>
-                                                        <tr>
-                                                            <th>Parameter</th>
-                                                            <th>Q1</th>
-                                                            <th>Q2</th>
-                                                            <th>Direction</th>
-                                                        </tr>
-                                                    </thead>
-                                                    <tbody>
-                                                        {editedMetricRows.map((row) => (
-                                                            <tr key={`${row.key}-q`}>
-                                                                <td className="sticky-col">{row.label}</td>
-                                                                <td>{row.quarterly[0] !== undefined ? formatMetricValue(row.quarterly[0], row.unit) : '—'}</td>
-                                                                <td>{row.quarterly[1] !== undefined ? formatMetricValue(row.quarterly[1], row.unit) : '—'}</td>
-                                                                <td>{getMetricDirection(row.key) === 'higher' ? 'Higher is better' : 'Lower is better'}</td>
-                                                            </tr>
-                                                        ))}
-                                                    </tbody>
-                                                </table>
-                                            </div>
-                                        </div>
-                                    </section>
-
-                                    <section className="trend-strip" style={{ marginTop: '12px' }}>
-                                        {editedMetricRows.slice(0, 6).map((row) => (
-                                            <MetricLineChart
-                                                key={row.key}
-                                                label={row.label}
-                                                values={row.values}
-                                                xLabels={editedTimelineLabels}
-                                                unit={row.unit}
-                                            />
-                                        ))}
-                                    </section>
-                                </>
-                            ) : (
-                                <article className="main-section-card">
-                                    <h3>No Metrics Found</h3>
-                                    <p>No numeric metric series were detected in this case study.</p>
-                                </article>
-                            )}
-                        </section>
-                    )}
-
-                    {!showMetricsPreview && activeSection && (
+                    {/* ── Section text editor — always shown for any selected section ── */}
+                    {activeSection && (
                         <section className="case-content-pane" style={{ marginTop: '20px' }}>
                             <article className="main-section-card">
                                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '12px', alignItems: 'center' }}>
@@ -1142,17 +1224,198 @@ const AdminEvaluation = () => {
                                         Delete Section
                                     </button>
                                 </div>
+
+                                {/* Auto-growing textarea — fills page, no internal scroll */}
                                 <textarea
-                                    style={{ width: '100%', minHeight: '600px', fontSize: '0.85rem', lineHeight: '1.6', background: 'var(--bg-subtle)', border: '1px dashed var(--border-default)', color: 'var(--text-primary)', padding: '16px', resize: 'vertical' }}
+                                    style={{
+                                        width: '100%',
+                                        minHeight: '200px',
+                                        height: 'auto',
+                                        fontSize: '0.85rem',
+                                        lineHeight: '1.6',
+                                        background: 'var(--bg-subtle)',
+                                        border: '1px dashed var(--border-default)',
+                                        color: 'var(--text-primary)',
+                                        padding: '16px',
+                                        resize: 'none',
+                                        overflow: 'hidden',
+                                        boxSizing: 'border-box',
+                                    }}
                                     value={activeSection.content}
-                                    onChange={(e) => updateActiveSection({ content: e.target.value })}
+                                    onChange={(e) => {
+                                        // Auto-grow: reset then set to scrollHeight so no internal scroll
+                                        e.target.style.height = 'auto';
+                                        e.target.style.height = e.target.scrollHeight + 'px';
+                                        updateActiveSection({ content: e.target.value });
+                                    }}
+                                    onFocus={(e) => {
+                                        e.target.style.height = 'auto';
+                                        e.target.style.height = e.target.scrollHeight + 'px';
+                                    }}
+                                    ref={(el) => {
+                                        // Set height on mount/section-change
+                                        if (el) {
+                                            el.style.height = 'auto';
+                                            el.style.height = el.scrollHeight + 'px';
+                                        }
+                                    }}
                                     placeholder="Section content"
                                 />
                             </article>
+
+                            {/* ── Inline charts from section content — no backend dependency ── */}
+                            {(() => {
+                                const inlineSeries = extractInlineSeries(activeSection.content || '');
+                                if (inlineSeries.length === 0) return null;
+                                return (
+                                    <>
+                                        <div style={{
+                                            marginTop: '16px',
+                                            padding: '12px 0 4px',
+                                            fontSize: '0.72rem',
+                                            fontWeight: 700,
+                                            letterSpacing: '0.08em',
+                                            color: 'var(--text-secondary)',
+                                            textTransform: 'uppercase',
+                                        }}>
+                                            Data Visualisation — edit the numbers above and charts update instantly
+                                        </div>
+                                        <section className="trend-strip" style={{ marginTop: '8px', flexWrap: 'wrap', gap: '12px' }}>
+                                            {inlineSeries.map((series, si) => (
+                                                <MetricLineChart
+                                                    key={`${activeSection.id}-series-${si}`}
+                                                    label={series.groupLabel}
+                                                    values={series.points.map((p) => p.value)}
+                                                    xLabels={series.points.map((p) => p.label)}
+                                                    unit="count"
+                                                />
+                                            ))}
+                                        </section>
+                                    </>
+                                );
+                            })()}
+
+                            {showMetricsPreview && editedMetricRows.length > 0 && (
+                                <>
+                                    <section className="metric-legend-strip" style={{ marginTop: '14px' }}>
+                                        <div className="metric-legend-group">
+                                            <span className="metric-legend-title">Units</span>
+                                            {editedUnitLegend.map((entry) => (
+                                                <span key={`admin-unit-${entry.unit}`} className="metric-legend-chip">{entry.label}</span>
+                                            ))}
+                                        </div>
+                                    </section>
+
+                                    <section className="kpi-rail" aria-label="Admin metrics KPI preview">
+                                        {editedMetricKpis.map((metric) => (
+                                            <article key={metric.key} className={`kpi-tile ${metric.isImproving ? 'up' : 'down'}`}>
+                                                <p className="kpi-tile__name">{metric.label}</p>
+                                                <p className="kpi-tile__unit">{unitDisplayLabel(metric.unit)}</p>
+                                                <p className="kpi-tile__value">{formatMetricValue(metric.current, metric.unit)}</p>
+                                                <p className={`kpi-tile__delta ${metric.delta >= 0 ? 'positive' : 'negative'}`}>
+                                                    {metric.delta >= 0 ? '+' : '-'}{formatMetricValue(Math.abs(metric.delta), metric.unit)} ({metric.deltaPct >= 0 ? '+' : ''}{metric.deltaPct.toFixed(1)}%)
+                                                </p>
+                                            </article>
+                                        ))}
+                                    </section>
+
+                                    <section className="metrics-deep-dive metrics-deep-dive--single" style={{ marginTop: '10px' }}>
+                                        <div className="table-card">
+                                            <div className="table-card__header">
+                                                <h3>Section Metrics Breakdown</h3>
+                                                <p>Live preview of case metrics in candidate format.</p>
+                                            </div>
+                                            <div className="metrics-table-wrap">
+                                                <table className="metrics-table">
+                                                    <thead>
+                                                        <tr>
+                                                            <th>Parameter</th>
+                                                            <th>Unit</th>
+                                                            {editedTimelineLabels.map((label, idx) => <th key={`${label}-${idx}`}>{label}</th>)}
+                                                            <th>Trend</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody>
+                                                        {editedMetricRows.map((row) => (
+                                                            <tr key={row.key}>
+                                                                <td className="sticky-col">{row.label}</td>
+                                                                <td>{unitDisplayLabel(row.unit)}</td>
+                                                                {editedTimelineLabels.map((_, idx) => {
+                                                                    const val = row.values[idx];
+                                                                    return <td key={`${row.key}-${idx}`}>{val !== undefined ? formatMetricValue(val, row.unit) : '—'}</td>;
+                                                                })}
+                                                                <td className={`trend-cell ${row.improving ? 'trend-positive' : 'trend-negative'}`}>{row.improving ? 'Improving' : 'Down'}</td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </div>
+                                    </section>
+
+                                    <section className="metrics-deep-dive metrics-deep-dive--single" style={{ marginTop: '10px' }}>
+                                        <div className="table-card">
+                                            <div className="table-card__header">
+                                                <h3>Metric Heatmap</h3>
+                                                <p>Darker cells indicate larger values in each row.</p>
+                                            </div>
+                                            <div className="metrics-table-wrap">
+                                                <div className="metric-heatmap-wrap">
+                                                    {editedMetricRows.slice(0, 8).map((row) => {
+                                                        const values = row.values.map(Number).filter(Number.isFinite);
+                                                        const min = Math.min(...values);
+                                                        const max = Math.max(...values);
+                                                        const span = Math.max(0.0001, max - min);
+
+                                                        return (
+                                                            <div key={`admin-heat-${row.key}`} className="metric-heatmap-row">
+                                                                <div className="metric-heatmap-row__label">{row.label}</div>
+                                                                <div className="metric-heatmap-cells">
+                                                                    {editedTimelineLabels.map((label, idx) => {
+                                                                        const value = values[idx];
+                                                                        if (value === undefined) {
+                                                                            return <div key={`admin-heat-${row.key}-${idx}`} className="metric-heatmap-cell metric-heatmap-cell--empty">—</div>;
+                                                                        }
+                                                                        const normalized = (value - min) / span;
+                                                                        const alpha = 0.16 + normalized * 0.78;
+                                                                        return (
+                                                                            <div
+                                                                                key={`admin-heat-${row.key}-${idx}`}
+                                                                                className="metric-heatmap-cell"
+                                                                                style={{ background: `rgba(31,111,235,${alpha.toFixed(3)})` }}
+                                                                                title={`${row.label} · ${label}: ${formatMetricValue(value, row.unit)}`}
+                                                                            >
+                                                                                <span>{label}</span>
+                                                                                <strong>{formatAxisTickValue(value, row.unit)}</strong>
+                                                                            </div>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                            </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </section>
+
+                                    <section className="trend-strip" style={{ marginTop: '10px' }}>
+                                        {editedMetricRows.slice(0, 6).map((row) => (
+                                            <MetricLineChart
+                                                key={`admin-chart-${row.key}`}
+                                                label={row.label}
+                                                values={row.values}
+                                                xLabels={editedTimelineLabels}
+                                                unit={row.unit}
+                                            />
+                                        ))}
+                                    </section>
+                                </>
+                            )}
                         </section>
                     )}
 
-                    {!showMetricsPreview && !activeSection && (
+                    {!activeSection && (
                         <section className="case-content-pane" style={{ marginTop: '20px' }}>
                             <article className="main-section-card">
                                 <h3>No Sections Left</h3>
@@ -1258,6 +1521,12 @@ const AdminEvaluation = () => {
                                 )}
                             </div>
                         )}
+
+                        <div className="admin-actions" style={{ justifyContent: 'flex-start', paddingTop: 0 }}>
+                            <button type="button" className="admin-btn secondary" onClick={handleCreateManualCase}>
+                                Create case study manually
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -1271,25 +1540,80 @@ const AdminEvaluation = () => {
                     ) : (
                         <div className="cases-list">
                             {caseStudies.map((row) => (
-                                <div key={row.id} className="case-list-row">
+                                <div key={row.id} className="case-list-row clickable" onClick={() => handleOpenCaseDetail(row.id)}>
                                     <div className="case-list-main">
                                         <div className="case-list-title">{row.title}</div>
                                         <div className="case-list-meta">
                                             {row.industry && <span className="case-chip">{row.industry}</span>}
+                                            <span className="case-chip case-mode-chip">{getCaseModeMeta(row).label}</span>
                                             <span className={`case-chip status-chip ${row.is_active ? 'active' : 'inactive'}`}>
                                                 {row.is_active ? 'ACTIVE' : 'INACTIVE'}
                                             </span>
                                         </div>
                                     </div>
                                     <div className="case-row-actions">
-                                        <button className="icon-action-btn" onClick={() => handleEditCase(row.id)} title="Edit Case">✏️</button>
-                                        <button className="icon-action-btn" onClick={() => handleDeleteCase(row.id)} title="Delete Case" style={{ color: '#ff4d4f' }}>🗑️</button>
+                                        <button className="icon-action-btn" onClick={(e) => { e.stopPropagation(); handleEditCase(row.id); }} title="Edit Case">✏️</button>
+                                        <button className="icon-action-btn" onClick={(e) => { e.stopPropagation(); handleDeleteCase(row.id); }} title="Delete Case" style={{ color: '#ff4d4f' }}>🗑️</button>
                                     </div>
                                 </div>
                             ))}
                         </div>
                     )}
                 </div>
+
+                {loadingCaseDetail && (
+                    <div className="save-banner" style={{ border: '1px solid var(--border-default)', background: 'var(--bg-subtle)' }}>
+                        Loading case details...
+                    </div>
+                )}
+
+                {selectedCaseDetail && (
+                    <>
+                        <div className="case-drawer-backdrop" onClick={() => setSelectedCaseDetail(null)} />
+                        <aside className="case-drawer" role="dialog" aria-label="Case study detail drawer">
+                            <div className="case-drawer-head">
+                                <div>
+                                    <div className="case-list-title">{selectedCaseDetail.title}</div>
+                                    <div className="case-list-meta" style={{ marginTop: '6px' }}>
+                                        {selectedCaseDetail.industry && <span className="case-chip">{selectedCaseDetail.industry}</span>}
+                                        <span className="case-chip case-mode-chip">{getCaseModeMeta(selectedCaseDetail).label}</span>
+                                        <span className="case-chip">PASS {Math.round((Number(selectedCaseDetail.thresholdPassingScore || 0.6) || 0.6) * 100)}%</span>
+                                    </div>
+                                </div>
+                                <button className="icon-action-btn" onClick={() => setSelectedCaseDetail(null)} title="Close">✕</button>
+                            </div>
+
+                            <div className="drawer-actions">
+                                <button className="admin-btn secondary" onClick={() => { setSelectedCaseDetail(null); handleEditCase(selectedCaseDetail.id); }}>
+                                    Edit Case Study
+                                </button>
+                            </div>
+
+                            <div className="drawer-summary" style={{ display: 'grid', gap: '10px' }}>
+                                {drawerSections.map((s) => (
+                                    <div key={`drawer-${s.id}`}>
+                                        <div className="preview-field-label">{s.heading}</div>
+                                        <div className="candidate-case-summary" style={{ marginBottom: 0 }}>{s.content}</div>
+                                    </div>
+                                ))}
+                            </div>
+
+                            {drawerMetricRows.length > 0 && (
+                                <section className="trend-strip" style={{ marginTop: '12px' }}>
+                                    {drawerMetricRows.slice(0, 6).map((row) => (
+                                        <MetricLineChart
+                                            key={`drawer-chart-${row.key}`}
+                                            label={row.label}
+                                            values={row.values}
+                                            xLabels={drawerTimelineLabels}
+                                            unit={row.unit}
+                                        />
+                                    ))}
+                                </section>
+                            )}
+                        </aside>
+                    </>
+                )}
             </div>
         </div>
     );

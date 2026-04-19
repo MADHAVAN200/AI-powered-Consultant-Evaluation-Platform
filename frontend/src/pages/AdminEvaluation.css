@@ -804,6 +804,12 @@ details[open] .section-item-heading::before { content: '\2212'; }
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
+
+.case-mode-chip {
+  color: #58a6ff;
+  border-color: rgba(88, 166, 255, 0.35);
+  background: rgba(88, 166, 255, 0.08);
+}
 .status-chip.active   { background: rgba(63,185,80,0.08); color: #3fb950; border-color: rgba(63,185,80,0.25); }
 .status-chip.inactive { background: rgba(99,110,123,0.08); color: var(--text-secondary); }
 
@@ -1111,6 +1117,12 @@ details[open] .section-item-heading::before { content: '\2212'; }
   border-radius: 10px;
   padding: 12px;
   background: var(--bg-subtle);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.candidate-case-card-horizontal:hover {
+  border-color: rgba(88, 166, 255, 0.5);
+  background: rgba(88, 166, 255, 0.06);
 }
 
 .candidate-case-head-horizontal {
