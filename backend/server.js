@@ -12,6 +12,7 @@ const { registerAssessmentRoutes } = require('./routes_assessment');
 const { registerCaseStudyRoutes } = require('./routes_case_studies');
 const { registerCandidateRoutes } = require('./routes_candidate');
 const { registerAdminRoutes } = require('./routes_admin');
+const uploadRouter = require('./routes/upload');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -46,6 +47,9 @@ registerAssessmentRoutes(app, apiController);
 registerCaseStudyRoutes(app, apiController, upload);
 registerCandidateRoutes(app, apiController);
 registerAdminRoutes(app, apiController);
+
+// PyMuPDF-based section-aware PDF parsing endpoint
+app.use('/api/upload', uploadRouter);
 
 app.listen(PORT, () => {
     console.log(`[BOOT] Interview Engine Server running on http://localhost:${PORT}`);

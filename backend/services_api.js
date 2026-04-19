@@ -1,6 +1,7 @@
-const pdfParseModule = require('pdf-parse');
-
-const pdfParse = pdfParseModule.default || pdfParseModule;
+const { parsePDF } = require('./utils/pdfParser');
+const path = require('path');
+const os   = require('os');
+const fs   = require('fs');
 
 const MAX_STRIKES = 3;
 const PASSING_MARKS = 65;
@@ -178,7 +179,6 @@ const extractBoldHeadingsFromPdfBuffer = async (buffer) => {
             for (const lineItems of lines.values()) {
                 lineItems.sort((a, b) => a.x - b.x);
                 const candidate = lineItems.map((i) => i.str).join(' ').replace(/\s+/g, ' ').trim();
-                if (!isHeadingLike(candidate)) continue;
 
                 const lineFontChars = new Map();
                 for (const item of lineItems) {
@@ -188,7 +188,15 @@ const extractBoldHeadingsFromPdfBuffer = async (buffer) => {
 
                 const hasExplicitBold = lineItems.some((i) => i.isBold);
                 const hasHeadingFontContrast = Boolean(linePrimaryFont && dominantFont && linePrimaryFont !== dominantFont);
+                
                 if (!hasExplicitBold && !hasHeadingFontContrast) continue;
+
+                // If explicitly bold, use relaxed constraints, else use strict constraints
+                if (hasExplicitBold) {
+                    if (candidate.length < 3 || candidate.length > 200) continue;
+                } else {
+                    if (!isHeadingLike(candidate)) continue;
+                }
 
                 const key = normalizeHeadingKey(candidate);
                 if (!seen.has(key)) {
@@ -309,7 +317,7 @@ const extractProblemQuestionsFromText = (problemText = '', fallbackFullText = ''
     const lineBased = [];
     for (const raw of source.split('\n')) {
         const line = String(raw || '').trim();
-        const m = line.match(/^(\d+)[).:]\s+(.{8,})$/);
+        const m = line.match(/^(\d+)[).:]?\s+(.{8,})$/);
         if (!m) continue;
         lineBased.push({ order: Number(m[1]), text: m[2].trim() });
     }
@@ -323,7 +331,7 @@ const extractProblemQuestionsFromText = (problemText = '', fallbackFullText = ''
 
     // Handles inline forms like: "1) ... 2) ... 3) ..."
     const flattened = source.replace(/\s+/g, ' ').trim();
-    const inlineMatches = [...flattened.matchAll(/(?:^|\s)(\d+)[).:]\s*(.+?)(?=(?:\s+\d+[).:]\s)|$)/g)];
+    const inlineMatches = [...flattened.matchAll(/(?:^|\s)(\d+)[).:]?\s*(.+?)(?=(?:\s+\d+[).:]?\s)|$)/g)];
     const inlineQuestions = inlineMatches
         .map((m) => ({ order: Number(m[1] || 0), text: String(m[2] || '').trim() }))
         .filter((q) => q.order > 0 && q.text.length > 8)
@@ -1665,37 +1673,136 @@ ${extractionSource}`;
         },
 
         async importCaseStudyPdf(file) {
-            if (!file || !file.buffer) throw new ApiError(400, 'PDF file is required (field name: pdf).');
-            const parsed = await pdfParse(file.buffer);
-            const boldHeadings = await extractBoldHeadingsFromPdfBuffer(file.buffer);
-            const heuristicDraft = generateCaseDraftFromPdf(parsed.text || '', { boldHeadings });
-            const draft = await refineImportedCaseDraftWithLlm(parsed.text || '', heuristicDraft);
+            if (!file) throw new ApiError(400, 'PDF file is required (field name: pdf).');
 
-            // _sections[] is the LLM-extracted structured store
-            // Fall back to counting flat heuristic keys if LLM failed
-            const llmSections = Array.isArray(draft.parsedSections?._sections)
-                ? draft.parsedSections._sections
-                : [];
-            const heuristicFlatKeys = Object.keys(draft.parsedSections || {})
-                .filter((k) => !String(k).startsWith('_'));
-            const sectionCount = llmSections.length || heuristicFlatKeys.length;
-            const seriesCount = Object.keys(draft.financialData || {}).length;
-            const llmExtracted = Boolean(draft.parsedSections?._llmExtracted);
+            // ── Resolve a filesystem path for the PyMuPDF subprocess ──────────
+            // The main upload route now uses disk storage, so file.path is the
+            // normal case. If an old memory-storage caller sends file.buffer,
+            // we write it to a temp file so the subprocess can read it.
+            let filePath;
+            let tempCreated = false;
 
-            return {
-                success: true,
-                draft,
-                meta: {
-                    fileName: file.originalname,
-                    pages: parsed.numpages || null,
-                    textLength: (parsed.text || '').length,
-                    sectionsDiscovered: sectionCount,
-                    numericSeriesFound: seriesCount,
-                    boldHeadingsDetected: boldHeadings.length,
-                    llmExtracted,
-                    llmSectionsCount: llmSections.length
+            if (file.path) {
+                filePath = file.path;
+            } else if (file.buffer) {
+                filePath = path.join(os.tmpdir(), `pdf_import_${Date.now()}_${process.pid}.pdf`);
+                fs.writeFileSync(filePath, file.buffer);
+                tempCreated = true;
+            } else {
+                throw new ApiError(400, 'PDF file is required (field name: pdf).');
+            }
+
+            try {
+                // ── PyMuPDF bold-text section extraction (no LLM) ────────────
+                const pymupdfResult = await parsePDF(filePath);
+
+                // ── Map PyMuPDF sections → _sections[] ───────────────────────
+                // PyMuPDF type  →  role expected by AdminEvaluation
+                const typeToRole = {
+                    DATA:     'data',
+                    CONTEXT:  'context',
+                    PROBLEM:  'problem',
+                    INTERNAL: 'other'
+                };
+
+                const seenHeadings = new Set();
+                const cleanSections = [];
+
+                for (const s of (pymupdfResult.sections || [])) {
+                    const heading = String(s.title || '').trim();
+                    if (!heading) continue;
+
+                    // Dedup by normalised heading key
+                    const normKey = normalizeHeadingKey(heading);
+                    if (seenHeadings.has(normKey)) continue;
+                    seenHeadings.add(normKey);
+
+                    // Flatten content[] (strings + { subheading } objects) → single string
+                    const contentLines = (Array.isArray(s.content) ? s.content : [])
+                        .map((item) => {
+                            if (typeof item === 'string') return item;
+                            if (item && typeof item.subheading === 'string') return `\n${item.subheading}`;
+                            return '';
+                        })
+                        .filter(Boolean);
+
+                    const content = contentLines.join('\n').trim();
+                    if (!content) continue;
+
+                    cleanSections.push({
+                        heading,
+                        content,
+                        role: typeToRole[s.type] || 'other'
+                    });
                 }
-            };
+
+                // ── Derive auxiliary draft fields from parsed content ─────────
+                const allText = [
+                    pymupdfResult.title || '',
+                    ...cleanSections.map((s) => `${s.heading}\n${s.content}`)
+                ].join('\n\n');
+
+                const title    = String(pymupdfResult.title || '').trim() || 'Imported Case Study';
+                const industry = inferIndustryFromText(allText);
+
+                // Numeric time-series (for Data & Metrics panel)
+                const numericSeries  = extractAllNumericSeries(allText);
+                const financialData  = {};
+                for (const [key, seriesObj] of Object.entries(numericSeries)) {
+                    financialData[key] = seriesObj.values;
+                }
+
+                // Context and problem text
+                const contextSection  = cleanSections.find((s) => s.role === 'context');
+                const problemSection  = cleanSections.find((s) => s.role === 'problem');
+                const context         = contextSection?.content || cleanSections[0]?.content || '';
+                const problemStatement = problemSection?.content || '';
+
+                // Problem questions
+                const sectionsForQ   = Object.fromEntries(
+                    cleanSections.filter((s) => s.role === 'problem').map((s) => [s.heading, s.content])
+                );
+                const problemQuestions = extractQuestionsFromSections(sectionsForQ, allText);
+
+                // Opening interviewer prompt
+                const initialPrompt = problemQuestions.length > 0
+                    ? `Welcome to your ${industry} case study: "${title}".\n\nHere are your problem questions:\n\n${problemQuestions.map((q, i) => `${i + 1}) ${q}`).join('\n')}\n\nPlease begin with your diagnostic hypothesis.`
+                    : `Welcome to your ${industry} case study: "${title}". Please begin by sharing your initial diagnostic hypothesis — what are the top 2–3 root causes of the central business problem?`;
+
+                const draft = {
+                    title,
+                    industry,
+                    context,
+                    problemStatement,
+                    initialPrompt,
+                    thresholdPassingScore: 0.6,
+                    financialData,
+                    parsedSections: {
+                        _sections:        cleanSections,
+                        _problemQuestions: problemQuestions,
+                        _numericSeries:   numericSeries,
+                        _llmExtracted:    false
+                    },
+                    rawContent: allText
+                };
+
+                return {
+                    success: true,
+                    draft,
+                    meta: {
+                        fileName:            file.originalname || 'uploaded.pdf',
+                        pages:               null,
+                        textLength:          allText.length,
+                        sectionsDiscovered:  cleanSections.length,
+                        numericSeriesFound:  Object.keys(financialData).length,
+                        boldHeadingsDetected: cleanSections.length,
+                        llmExtracted:        false,
+                        llmSectionsCount:    cleanSections.length
+                    }
+                };
+            } finally {
+                if (tempCreated) { try { fs.unlinkSync(filePath); } catch (_) {} }
+            }
         },
 
         async createCaseStudy(payload) {
