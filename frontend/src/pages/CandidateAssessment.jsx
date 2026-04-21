@@ -802,7 +802,13 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
     const [simulationValues, setSimulationValues] = useState({});
     const [simulationRows, setSimulationRows] = useState([]);
     const [simulationRunsByQuestionId, setSimulationRunsByQuestionId] = useState({});
+    const [speechSupported, setSpeechSupported] = useState(false);
+    const [isListening, setIsListening] = useState(false);
+    const [speechError, setSpeechError] = useState('');
     const chatEndRef = useRef(null);
+    const speechRecognitionRef = useRef(null);
+    const speechBaseInputRef = useRef('');
+    const speechFinalTranscriptRef = useRef('');
     const dashboardPath = userRole === 'admin' ? '/admin/dashboard' : '/candidate/dashboard';
 
     const startLeftResize = (e) => {
@@ -851,6 +857,98 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
 
         return undefined;
     }, []);
+
+    useEffect(() => {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+            setSpeechSupported(false);
+            return undefined;
+        }
+
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+
+        recognition.onstart = () => {
+            setIsListening(true);
+            setSpeechError('');
+        };
+
+        recognition.onresult = (event) => {
+            let interimTranscript = '';
+
+            for (let i = event.resultIndex; i < event.results.length; i += 1) {
+                const text = String(event.results[i]?.[0]?.transcript || '').trim();
+                if (!text) continue;
+                if (event.results[i].isFinal) {
+                    speechFinalTranscriptRef.current = `${speechFinalTranscriptRef.current} ${text}`.trim();
+                } else {
+                    interimTranscript = `${interimTranscript} ${text}`.trim();
+                }
+            }
+
+            const merged = [speechBaseInputRef.current, speechFinalTranscriptRef.current, interimTranscript]
+                .filter((part) => String(part || '').trim().length > 0)
+                .join(' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+
+            setInput(merged);
+        };
+
+        recognition.onerror = (event) => {
+            const code = String(event?.error || 'unknown');
+            const map = {
+                'not-allowed': 'Microphone access was denied.',
+                'service-not-allowed': 'Speech service unavailable in this browser.',
+                'no-speech': 'No speech detected. Try again.',
+                'audio-capture': 'No microphone detected.',
+                'network': 'Speech recognition network error.'
+            };
+            setSpeechError(map[code] || 'Speech recognition error.');
+        };
+
+        recognition.onend = () => {
+            setIsListening(false);
+        };
+
+        speechRecognitionRef.current = recognition;
+        setSpeechSupported(true);
+
+        return () => {
+            try {
+                recognition.stop();
+            } catch {
+                // no-op
+            }
+            speechRecognitionRef.current = null;
+            setIsListening(false);
+        };
+    }, []);
+
+    const toggleSpeechToText = () => {
+        if (!speechSupported || !speechRecognitionRef.current) return;
+
+        if (isListening) {
+            try {
+                speechRecognitionRef.current.stop();
+            } catch {
+                // no-op
+            }
+            return;
+        }
+
+        speechBaseInputRef.current = String(input || '').trim();
+        speechFinalTranscriptRef.current = '';
+        setSpeechError('');
+
+        try {
+            speechRecognitionRef.current.start();
+        } catch {
+            setSpeechError('Unable to start speech recognition.');
+        }
+    };
 
     useEffect(() => {
         if (!session?.id || !Array.isArray(questionTracker) || questionTracker.length === 0) return;
@@ -950,6 +1048,15 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
     const handleSendMessage = async (e) => {
         e.preventDefault();
         if (!input.trim() || isSending || status !== 'active') return;
+
+        if (isListening && speechRecognitionRef.current) {
+            try {
+                speechRecognitionRef.current.stop();
+            } catch {
+                // no-op
+            }
+        }
+
         const userMsg = input.trim();
         const activeQuestion = questionTracker[activeQuestionIndex] || null;
         const activeQuestionId = activeQuestion?.id || 'global';
@@ -1373,7 +1480,10 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
             if (Math.abs(diff) < 0.0001) continue;
             const direction = directionMap[key];
             const isImprovement = direction === 'higher' ? diff > 0 : diff < 0;
-            const entry = `${row.label}: ${diff >= 0 ? '+' : ''}${formatMetricValue(diff, row.unit)}`;
+            const shortLabel = String(row.label || '').length > 44
+                ? `${String(row.label).slice(0, 44)}...`
+                : row.label;
+            const entry = `${shortLabel}: ${diff >= 0 ? '+' : ''}${formatMetricValue(diff, row.unit)}`;
             if (isImprovement) improved.push(entry);
             else worsened.push(entry);
         }
@@ -1916,49 +2026,42 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                     </div>
 
                     {decisionImpact && (
-                        <div className="impact-box" style={{ marginTop: '16px', background: 'var(--bg-layer-2)', padding: '12px', borderRadius: '8px', border: '1px solid var(--border-subtle)', fontSize: '0.85rem' }}>
-                            <p className="impact-box__title" style={{ textTransform: 'uppercase', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '12px', fontSize: '0.75rem', letterSpacing: '0.5px' }}>{decisionImpact.title}</p>
-                            
+                        <div className="impact-box" style={{ marginTop: '16px' }}>
+                            <p className="impact-box__title">{decisionImpact.title}</p>
+
                             {decisionImpact.isReset ? (
-                                <p style={{ color: 'var(--text-muted)' }}>Awaiting candidate response...</p>
+                                <p className="impact-empty-text">Awaiting candidate response...</p>
                             ) : (
                                 <>
-                                    {decisionImpact.improved.length > 0 && (
-                                        <div style={{ marginBottom: '12px' }}>
-                                            <p style={{ color: 'var(--trend-up)', fontWeight: 600, marginBottom: '4px' }}>Improved Signals</p>
-                                            <ul style={{ listStyleType: 'disc', paddingLeft: '20px', color: 'var(--text-primary)', margin: 0 }}>
-                                                {decisionImpact.improved.slice(0, 5).map((item, idx) => <li key={`impr-${idx}`} style={{ marginBottom: '2px', color: 'var(--text-primary)' }}>{item}</li>)}
-                                            </ul>
-                                        </div>
-                                    )}
+                                    <div className="impact-kpi-grid">
+                                        <article className="impact-kpi-card good">
+                                            <p className="impact-kpi-label">Improved</p>
+                                            <p className="impact-kpi-value">{decisionImpact.improved.length}</p>
+                                        </article>
+                                        <article className="impact-kpi-card bad">
+                                            <p className="impact-kpi-label">Worsened</p>
+                                            <p className="impact-kpi-value">{decisionImpact.worsened.length}</p>
+                                        </article>
+                                        <article className="impact-kpi-card neutral">
+                                            <p className="impact-kpi-label">Missed</p>
+                                            <p className="impact-kpi-value">{decisionImpact.missed.length}</p>
+                                        </article>
+                                    </div>
 
-                                    {decisionImpact.worsened.length > 0 && (
-                                        <div style={{ marginBottom: '12px' }}>
-                                            <p style={{ color: 'var(--trend-down)', fontWeight: 600, marginBottom: '4px' }}>Worsened Signals</p>
-                                            <ul style={{ listStyleType: 'disc', paddingLeft: '20px', color: 'var(--text-primary)', margin: 0 }}>
-                                                {decisionImpact.worsened.slice(0, 5).map((item, idx) => <li key={`wors-${idx}`} style={{ marginBottom: '2px', color: 'var(--text-primary)' }}>{item}</li>)}
-                                            </ul>
-                                        </div>
-                                    )}
-
-                                    {!decisionImpact.isBaseline && decisionImpact.missed.length > 0 && (
-                                        <p style={{ color: 'var(--text-muted)', marginTop: '8px' }}>Missed metrics: {decisionImpact.missed.join(', ')}</p>
-                                    )}
-                                    
-                                    {!decisionImpact.isBaseline && decisionImpact.improved.length === 0 && decisionImpact.worsened.length === 0 && (
-                                        <p style={{ color: 'var(--text-muted)' }}>No measurable signal changes yet.</p>
-                                    )}
-
-                                    {sidebarImpactSeries.length > 0 && (
-                                        <div style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px solid var(--border-subtle)' }}>
-                                            <p style={{ color: 'var(--text-secondary)', fontWeight: 600, fontSize: '0.72rem', letterSpacing: '0.04em', marginBottom: '8px' }}>
-                                                Q{(activeQuestion?.index ?? 0) + 1} VISUAL RESPONSE SIGNALS
-                                            </p>
-                                            <div style={{ display: 'grid', gap: '8px' }}>
-                                                {sidebarImpactSeries.map((row) => (
-                                                    <SparkBar key={`impact-${row.key}`} label={row.label} values={row.values} />
-                                                ))}
-                                            </div>
+                                    {(decisionImpact.worsened.length > 0 || decisionImpact.improved.length > 0) && (
+                                        <div className="impact-kpi-signals">
+                                            {decisionImpact.worsened.slice(0, 2).map((item, idx) => (
+                                                <div key={`wk-${idx}`} className="impact-signal-row bad">
+                                                    <span>Down</span>
+                                                    <strong>{String(item || '').split(':')[0]}</strong>
+                                                </div>
+                                            ))}
+                                            {decisionImpact.improved.slice(0, 1).map((item, idx) => (
+                                                <div key={`ik-${idx}`} className="impact-signal-row good">
+                                                    <span>Up</span>
+                                                    <strong>{String(item || '').split(':')[0]}</strong>
+                                                </div>
+                                            ))}
                                         </div>
                                     )}
                                 </>
@@ -2024,26 +2127,51 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
 
                 {status === 'active' && !allQuestionsClosed ? (
                     <form className="chat-input-form" onSubmit={handleSendMessage}>
-                        <div className="chat-input-wrap">
+                        <div className="chat-input-wrap prompt-composer">
                             <textarea
-                                className="chat-textarea"
+                                className="chat-textarea prompt-text-input"
                                 value={input}
                                 onChange={(e) => setInput(e.target.value)}
-                                placeholder={activeQuestionClosed ? 'This question is closed. Select another open question.' : 'Respond with diagnosis, numbers, recommendations, and risk'}
+                                placeholder="Type a message..."
                                 onKeyDown={(e) => {
                                     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(e); }
                                 }}
-                                rows={3}
+                                rows={1}
                                 disabled={activeQuestionClosed}
                             />
-                            <button type="submit" className="chat-send-btn" disabled={isSending || !input.trim() || activeQuestionClosed} aria-label="Send">
-                                <svg viewBox="0 0 24 24" width="18" height="18" fill="none">
-                                    <path d="M3 11.5L21 3L13.5 21L11 13L3 11.5Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                                </svg>
-                            </button>
+                            <div className="prompt-actions">
+                                {!input.trim() ? (
+                                    <button
+                                        type="button"
+                                        className={`chat-send-btn prompt-send-btn ${isListening ? 'active' : ''}`}
+                                        onClick={toggleSpeechToText}
+                                        disabled={!speechSupported || activeQuestionClosed || isSending}
+                                        aria-label={isListening ? 'Stop voice input' : 'Start voice input'}
+                                        title={isListening ? 'Stop voice input' : 'Start voice input'}
+                                        style={isListening ? { background: '#f85149', boxShadow: '0 0 12px rgba(248, 81, 73, 0.4)' } : {}}
+                                    >
+                                        <svg viewBox="0 0 24 24" width="26" height="26" fill="none">
+                                            <rect x="9" y="3" width="6" height="10" rx="3" stroke="currentColor" strokeWidth="2.4" />
+                                            <path d="M6 10.5C6 14.09 8.91 17 12.5 17C16.09 17 19 14.09 19 10.5" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+                                            <path d="M12.5 17V21" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+                                        </svg>
+                                    </button>
+                                ) : (
+                                    <button 
+                                        type="submit" 
+                                        className="chat-send-btn prompt-send-btn" 
+                                        disabled={isSending || activeQuestionClosed} 
+                                        aria-label="Send"
+                                    >
+                                        <svg viewBox="0 0 24 24" width="26" height="26" fill="none">
+                                            <path d="M12 6V18" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
+                                            <path d="M7 11L12 6L17 11" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
+                                        </svg>
+                                    </button>
+                                )}
+                            </div>
                         </div>
-                        <p className="input-hint">Coach hint: {coachNote}</p>
-                        <p className="input-hint">Question attempts left: {activeQuestionAttemptsLeft}/3</p>
+                        {speechError && <p className="input-hint speech-error-hint">{speechError}</p>}
                     </form>
                 ) : (
                     <div className="session-conclusion">
