@@ -3,8 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useData } from '../context/DataContext';
 import './Assessment.css';
-
-const API_BASE = 'http://localhost:5000/api';
+import { API_BASE } from '../config/api';
 
 const getSystemTheme = () => (
     window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
@@ -120,10 +119,12 @@ const SparkBar = ({ label, values }) => {
     );
 };
 
-const prettifyMetricLabel = (raw = '') => String(raw)
-    .replace(/_/g, ' ')
-    .replace(/\b\w/g, (c) => c.toUpperCase())
-    .trim();
+const prettifyMetricLabel = (raw = '') => {
+    let s = String(raw).replace(/_/g, ' ').trim();
+    // Strip leading section numbers/patterns like "2. ", "Section 2: ", or "2_"
+    s = s.replace(/^(\d+[\.\s_:-]+|section\s+\d+[\.\s_:-]+)/i, '');
+    return s.replace(/\b\w/g, (c) => c.toUpperCase()).trim();
+};
 
 const toMetricKey = (raw = '') => String(raw || '')
     .toLowerCase()
@@ -213,27 +214,32 @@ const metricBelongsToSection = (row, section) => {
     if (!row) return false;
     if (!section) return true;
 
+    // 1. Strict Affinity: If row has an explicit source section, it ONLY belongs there.
+    if (row.sourceSectionId) {
+        return row.sourceSectionId === section.id;
+    }
+
+    // 2. Keyword Matching for Global/Unassigned Metrics
     const sectionText = `${section.heading || ''} ${section.sourceKey || ''} ${section.content || ''}`.toLowerCase();
     const metricText = `${row.key || ''} ${row.label || ''}`.toLowerCase();
 
-    const inFinancialSection = /financial|revenue|profit|margin|cost|ebitda|cash|income|expense/.test(sectionText);
-    const inCustomerSection = /customer|marketing|retention|acquisition|nps|satisfaction|churn|conversion/.test(sectionText);
-    const inOperationsSection = /operations|operational|delivery|logistics|process|efficiency|utilization|downtime/.test(sectionText);
-    const inTrendSection = /time series|timeseries|trend|event|timeline|month|quarter/.test(sectionText);
+    // Define mutually exclusive category flags to reduce overlap leakage
+    const isFinSec = /financial|revenue|profit|margin|cost|ebitda|cash|income|expense|asset|liabilit|balance sheet/.test(sectionText);
+    const isCustSec = /customer|marketing|retention|acquisition|nps|satisfaction|churn|conversion|client|complaint/.test(sectionText);
+    const isOpsSec = /operations|operational|delivery|logistics|process|efficiency|utilization|downtime|cycle|lead time/.test(sectionText);
+    const isTrendSec = /time series|timeseries|trend|event|timeline|month|quarter/.test(sectionText);
 
-    if (inFinancialSection) {
-        return /revenue|profit|margin|cost|ebitda|cash|arpu|aov|pricing|income|expense|burn/.test(metricText);
-    }
-    if (inCustomerSection) {
-        return /churn|retention|customer|nps|cac|ltv|conversion|repeat|complaint|satisfaction/.test(metricText);
-    }
-    if (inOperationsSection) {
-        return /delay|delivery|cycle|utilization|downtime|sla|throughput|inventory|defect|backlog|ops|operations/.test(metricText);
-    }
-    if (inTrendSection) {
-        return /trend|month|quarter|time|series|growth|rate|revenue|profit|cost|churn|delivery/.test(metricText);
-    }
+    const isFinMet = /revenue|profit|margin|cost|ebitda|cash|arpu|aov|pricing|income|expense|burn|asset|liabilit/.test(metricText);
+    const isCustMet = /churn|retention|customer|nps|cac|ltv|conversion|repeat|complaint|satisfaction/.test(metricText);
+    const isOpsMet = /delay|delivery|cycle|utilization|downtime|sla|throughput|inventory|defect|backlog|ops|operations/.test(metricText);
+    const isTrendMet = /trend|month|quarter|time|series|growth|rate/.test(metricText);
 
+    if (isFinSec) return isFinMet;
+    if (isCustSec) return isCustMet;
+    if (isOpsSec) return isOpsMet;
+    if (isTrendSec) return isTrendMet || isFinMet || isCustMet || isOpsMet;
+
+    // Fallback: simple token overlap for generic sections
     const sectionTokens = new Set(tokenizeSimple(sectionText));
     const metricTokens = tokenizeSimple(metricText);
     return metricTokens.some((t) => sectionTokens.has(t));
@@ -1209,8 +1215,11 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                 let key = toMetricKey(`${sectionSeed}_${series?.groupLabel || `series_${idx + 1}`}`);
                 if (!key) key = `series_${sectionSeed}_${idx + 1}`;
 
-                if (Array.isArray(map[key]) && map[key].length >= values.length) return;
-                map[key] = values;
+                if (Array.isArray(map[key]?.values) && map[key].values.length >= values.length) return;
+                map[key] = {
+                    values,
+                    sourceSectionId: section.id
+                };
             });
         }
 
@@ -1224,14 +1233,20 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
         const parsedSections = getParsedSectionsFromCase(caseStudy || {});
         const numericFromParsed = (parsedSections && typeof parsedSections._numericSeries === 'object')
             ? Object.fromEntries(
-                Object.entries(parsedSections._numericSeries).map(([k, v]) => [k, Array.isArray(v?.values) ? v.values : []])
+                Object.entries(parsedSections._numericSeries).map(([k, v]) => [
+                    k, 
+                    { 
+                        values: Array.isArray(v?.values) ? v.values : [],
+                        sourceSectionId: v?.sourceSectionId || null 
+                    }
+                ])
             )
             : {};
 
         return {
             ...inlineSeriesData,
             ...numericFromParsed,
-            ...financialData
+            ...financialData // These stay global/heuristic-based
         };
     }, [caseStudy, inlineSeriesData]);
 
@@ -1259,8 +1274,13 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
 
     const metricRows = useMemo(() => {
         return Object.entries(mergedNumericData || {})
-            .filter(([, v]) => Array.isArray(v) && v.length > 0)
-            .map(([key, values]) => {
+            .filter(([, v]) => {
+                const values = Array.isArray(v) ? v : (v?.values || []);
+                return Array.isArray(values) && values.length > 0;
+            })
+            .map(([key, v]) => {
+                const values = Array.isArray(v) ? v : (v?.values || []);
+                const sourceSectionId = Array.isArray(v) ? null : (v?.sourceSectionId || null);
                 const nums = values.map(Number).filter(Number.isFinite);
                 const unit = inferMetricUnit(key, nums);
                 const qAgg = aggregateQuarterly(nums);
@@ -1274,7 +1294,8 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                     values: nums,
                     quarterly: qAgg,
                     delta,
-                    improving
+                    improving,
+                    sourceSectionId
                 };
             });
     }, [mergedNumericData]);
@@ -1422,7 +1443,12 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
         latestActiveQuestionAnswer
     ]);
 
-    const sectionHasDataMetrics = sectionOriginalMetricRows.length > 0;
+    // sectionHasDataMetrics matches Admin's showMetricsPreview logic for consistency
+    const sectionHasDataMetrics = useMemo(() => {
+        if (!activeSectionData) return false;
+        if (activeCaseSection === 'metrics') return true;
+        return isMetricsSection(activeSectionData) || sectionOriginalMetricRows.length > 0;
+    }, [activeSectionData, activeCaseSection, sectionOriginalMetricRows, isMetricsSection]);
 
     const displayedMetricRows = useMemo(() => sectionDynamicMetricRows, [sectionDynamicMetricRows]);
 
@@ -1718,7 +1744,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                         </div>
                     </article>
 
-                    {activeInlineSeries.length > 0 && !sectionHasDataMetrics && (
+                    {activeInlineSeries.length > 0 && !sectionHasDataMetrics && !isMetricsSection(activeSectionData) && (
                         <>
                             <div style={{
                                 marginTop: '16px',
@@ -1748,23 +1774,16 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                 )}
 
                 {sectionHasDataMetrics && displayedMetricRows.length > 0 && (
-                <section className="metric-legend-strip" aria-label="Units and indicator legend">
+                <>
+                <section className="metric-legend-strip" aria-label="Units and indicator legend" style={{ marginTop: '14px' }}>
                     <div className="metric-legend-group">
                         <span className="metric-legend-title">Units</span>
                         {displayedUnitLegend.map((entry) => (
                             <span key={`unit-${entry.unit}`} className="metric-legend-chip">{entry.label}</span>
                         ))}
                     </div>
-                    <div className="metric-legend-group">
-                        <span className="metric-legend-title">Indicators</span>
-                        <span className="metric-legend-chip metric-legend-chip--good">Green = Improving</span>
-                        <span className="metric-legend-chip metric-legend-chip--bad">Red = Worsening</span>
-                        <span className="metric-legend-chip">Heatmap = Higher intensity means higher value</span>
-                    </div>
                 </section>
-                )}
 
-                {sectionHasDataMetrics && displayedMetricRows.length > 0 && (
                 <section className="kpi-rail" aria-label="Executive KPI rail">
                     {displayedKpis.slice(0, 8).map((metric) => (
                         <article key={metric.key} className={`kpi-tile ${metric.isImproving ? 'up' : 'down'}`}>
@@ -1777,11 +1796,8 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                         </article>
                     ))}
                 </section>
-                )}
 
-                {sectionHasDataMetrics && displayedMetricRows.length > 0 && (
-                <>
-                <section className="metrics-deep-dive metrics-deep-dive--single">
+                <section className="metrics-deep-dive metrics-deep-dive--single" style={{ marginTop: '10px' }}>
                     <div className="table-card">
                         <div className="table-card__header">
                             <h3>Section Metrics Breakdown</h3>
@@ -1813,15 +1829,13 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                                             <td className={`trend-cell ${row.improving ? 'trend-positive' : 'trend-negative'}`}>{row.improving ? 'Improving' : 'Down'}</td>
                                         </tr>
                                     ))}
-                
                                 </tbody>
                             </table>
                         </div>
                     </div>
-
                 </section>
 
-                <section className="metrics-deep-dive metrics-deep-dive--single">
+                <section className="metrics-deep-dive metrics-deep-dive--single" style={{ marginTop: '10px' }}>
                     <div className="table-card">
                         <div className="table-card__header">
                             <h3>Metric Heatmap</h3>
@@ -1865,22 +1879,19 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                             </div>
                         </div>
                     </div>
-
                 </section>
 
-                {displayedMetricRows.length > 0 && (
-                    <section className="trend-strip">
-                        {displayedMetricRows.slice(0, 5).map((row) => (
-                            <MetricLineChart
-                                key={row.key}
-                                label={row.label}
-                                values={row.values}
-                                xLabels={displayedTimelineLabels}
-                                unit={row.unit}
-                            />
-                        ))}
-                    </section>
-                )}
+                <section className="trend-strip" style={{ marginTop: '10px' }}>
+                    {displayedMetricRows.slice(0, 6).map((row) => (
+                        <MetricLineChart
+                            key={row.key}
+                            label={row.label}
+                            values={row.values}
+                            xLabels={displayedTimelineLabels}
+                            unit={row.unit}
+                        />
+                    ))}
+                </section>
                 </>
                 )}
 
@@ -1980,7 +1991,8 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                                     </div>
                                 </div>
                             </div>
-
+                        </section>
+                        <section className="metrics-deep-dive">
                             <div className="table-card">
                                 <div className="table-card__header">
                                     <h3>Simulation KPI Rail</h3>
@@ -2002,7 +2014,6 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                                 </div>
                             </div>
                         </section>
-
                     </>
                 )}
             </main>

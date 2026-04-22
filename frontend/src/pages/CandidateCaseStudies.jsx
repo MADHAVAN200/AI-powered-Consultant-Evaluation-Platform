@@ -2,8 +2,7 @@ import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import './AdminEvaluation.css';
-
-const API_BASE = 'http://localhost:5000/api';
+import { API_BASE } from '../config/api';
 
 const getParsedSections = (row = {}) => {
   const raw = row?.parsed_sections ?? row?.parsedSections ?? {};
