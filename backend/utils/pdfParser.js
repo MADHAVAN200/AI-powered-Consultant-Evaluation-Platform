@@ -130,15 +130,33 @@ if __name__ == "__main__":
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Locate the Python interpreter. Prefers the project .venv on Windows. */
+/** Locate the Python interpreter. Robust cross-platform detection. */
 function resolvePythonBin() {
-    if (process.platform === 'win32') {
-        const projectRoot = path.resolve(__dirname, '..', '..');
-        const venvPython  = path.join(projectRoot, '.venv', 'Scripts', 'python.exe');
-        if (fs.existsSync(venvPython)) return venvPython;
-        // Fallback to system python
-        return 'python';
+    const configuredPython = String(process.env.PYTHON_BIN || '').trim();
+    const projectRoot = path.resolve(__dirname, '..', '..');
+    const venvPython = process.platform === 'win32'
+        ? path.join(projectRoot, '.venv', 'Scripts', 'python.exe')
+        : path.join(projectRoot, '.venv', 'bin', 'python');
+
+    const candidates = [
+        configuredPython,
+        venvPython,
+        process.platform === 'win32' ? 'python' : 'python3',
+        'python',
+    ].filter(Boolean);
+
+    for (const cmd of candidates) {
+        try {
+            // If it's a file path, check existence first
+            if (/[\\/]/.test(cmd) || cmd.toLowerCase().endsWith('.exe')) {
+                if (fs.existsSync(cmd)) return cmd;
+                continue;
+            }
+            return cmd; // Return system commands like 'python3' and assume they work (or let execFile fail gracefully)
+        } catch (_) {}
     }
-    return 'python3';
+
+    return process.platform === 'win32' ? 'python' : 'python3';
 }
 
 // ─── Exported function ────────────────────────────────────────────────────────

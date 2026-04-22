@@ -8,8 +8,14 @@ from hashlib import sha1
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import chromadb
-from chromadb.config import Settings
+try:
+    import chromadb
+    from chromadb.config import Settings
+    _CHROMA_IMPORT_ERROR: Optional[str] = None
+except BaseException as exc:
+    chromadb = None  # type: ignore[assignment]
+    Settings = None  # type: ignore[assignment]
+    _CHROMA_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
@@ -47,17 +53,35 @@ GROQ_MODEL = os.getenv("RAG_GROQ_MODEL", "llama-3.3-70b-versatile")
 CHROMA_COLLECTION = os.getenv("RAG_CHROMA_COLLECTION", "case_chunks")
 CHROMA_PERSIST_DIR = os.getenv("RAG_CHROMA_PERSIST_DIR", str((Path(__file__).resolve().parent / ".chroma").resolve()))
 RAG_DEBUG_LOGS = str(os.getenv("RAG_DEBUG_LOGS", "")).strip().lower() in {"1", "true", "yes", "on"}
+RAG_VECTOR_STORE_ENABLED = str(os.getenv("RAG_VECTOR_STORE_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
 
-embeddings = HuggingFaceEmbeddings(model_name=RAG_EMBEDDING_MODEL)
+embeddings = None
+_EMBEDDINGS_READY = True
+_EMBEDDINGS_ERROR: Optional[str] = None
+try:
+    embeddings = HuggingFaceEmbeddings(model_name=RAG_EMBEDDING_MODEL)
+except BaseException as exc:
+    _EMBEDDINGS_READY = False
+    _EMBEDDINGS_ERROR = f"{type(exc).__name__}: {exc}"
+
 splitter = RecursiveCharacterTextSplitter(chunk_size=900, chunk_overlap=140)
 Path(CHROMA_PERSIST_DIR).mkdir(parents=True, exist_ok=True)
-_chroma_client = chromadb.PersistentClient(
-    path=CHROMA_PERSIST_DIR,
-    settings=Settings(anonymized_telemetry=False)
-)
+_chroma_client = None
+_CHROMA_READY = chromadb is not None and _EMBEDDINGS_READY and RAG_VECTOR_STORE_ENABLED
+if _CHROMA_READY:
+    try:
+        _chroma_client = chromadb.PersistentClient(
+            path=CHROMA_PERSIST_DIR,
+            settings=Settings(anonymized_telemetry=False)
+        )
+    except Exception as exc:
+        _CHROMA_READY = False
+        _CHROMA_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
 
 
 def _get_collection():
+    if not _CHROMA_READY or _chroma_client is None:
+        return None
     return _chroma_client.get_or_create_collection(name=CHROMA_COLLECTION)
 
 
@@ -198,6 +222,13 @@ def _build_documents(case_study: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _index_case(case_study: Dict[str, Any]) -> Dict[str, Any]:
+    if not _CHROMA_READY:
+        return {
+            "indexed": 0,
+            "case_id": str(case_study.get("id") or "unknown-case"),
+            "vector_store": "disabled"
+        }
+
     docs = _build_documents(case_study)
     if not docs:
         return {"indexed": 0, "case_id": str(case_study.get("id") or "unknown-case")}
@@ -233,6 +264,14 @@ def _index_case(case_study: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _ensure_case_index(case_study: Dict[str, Any]) -> Dict[str, Any]:
+    if not _CHROMA_READY:
+        return {
+            "indexed": 0,
+            "case_id": str(case_study.get("id") or "unknown-case"),
+            "case_version": _case_version(case_study),
+            "vector_store": "disabled"
+        }
+
     case_id = str(case_study.get("id") or "unknown-case")
     case_version = _case_version(case_study)
     collection = _get_collection()
@@ -259,6 +298,9 @@ def _lexical_retrieve(case_study: Dict[str, Any], query: str, top_k: int = 8) ->
 
 
 def _retrieve_chunks(case_study: Dict[str, Any], query: str, top_k: int = 8) -> List[Dict[str, Any]]:
+    if not _CHROMA_READY:
+        return _lexical_retrieve(case_study, query, top_k)
+
     case_id = str(case_study.get("id") or "unknown-case")
     case_version = _case_version(case_study)
     q_vector = embeddings.embed_query(query)
@@ -418,7 +460,11 @@ app = FastAPI(title=APP_TITLE)
 def health() -> Dict[str, Any]:
     return {
         "status": "ok",
-        "vector_store": "chroma",
+        "vector_store": "chroma" if _CHROMA_READY else "lexical-fallback",
+        "vector_store_enabled": RAG_VECTOR_STORE_ENABLED,
+        "vector_store_error": _CHROMA_IMPORT_ERROR,
+        "embeddings_ready": _EMBEDDINGS_READY,
+        "embeddings_error": _EMBEDDINGS_ERROR,
         "collection": CHROMA_COLLECTION,
         "persist_dir": CHROMA_PERSIST_DIR,
         "debug": RAG_DEBUG_LOGS,
@@ -427,6 +473,15 @@ def health() -> Dict[str, Any]:
 
 @app.get("/rag/debug/case/{case_id}")
 def debug_case_chunks(case_id: str, limit: int = 20) -> Dict[str, Any]:
+    if not _CHROMA_READY:
+        return {
+            "success": False,
+            "case_id": str(case_id),
+            "count": 0,
+            "samples": [],
+            "message": "Vector store unavailable; running in lexical fallback mode.",
+        }
+
     collection = _get_collection()
     safe_limit = max(1, min(100, int(limit)))
     rows = collection.get(where={"case_id": str(case_id)}, include=["metadatas", "documents"], limit=safe_limit)

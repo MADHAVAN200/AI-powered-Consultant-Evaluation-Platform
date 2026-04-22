@@ -1,9 +1,11 @@
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 const { createClient } = require('@supabase/supabase-js');
 const { Groq } = require('groq-sdk');
-require('dotenv').config();
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const { createApiService } = require('./services_api');
 const { createApiController } = require('./controllers_api');
@@ -50,6 +52,21 @@ registerAdminRoutes(app, apiController);
 
 // PyMuPDF-based section-aware PDF parsing endpoint
 app.use('/api/upload', uploadRouter);
+
+const shouldServeFrontend = /^(1|true|yes|on)$/i.test(String(process.env.SERVE_FRONTEND || '').trim());
+if (shouldServeFrontend) {
+    const frontendDistPath = path.resolve(__dirname, '..', 'frontend', 'dist');
+    if (fs.existsSync(frontendDistPath)) {
+        app.use(express.static(frontendDistPath));
+        app.get(/^\/(?!api).*/, (req, res) => {
+            res.sendFile(path.join(frontendDistPath, 'index.html'));
+        });
+        console.log(`[BOOT] Serving frontend from ${frontendDistPath} (Single-port mode)`);
+    } else {
+        console.warn(`[BOOT] SERVE_FRONTEND is true but directory NOT FOUND: ${frontendDistPath}`);
+        console.warn(`[BOOT] Run 'npm run build' in the frontend directory to fix this.`);
+    }
+}
 
 app.listen(PORT, () => {
     console.log(`[BOOT] Interview Engine Server running on http://localhost:${PORT}`);
