@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import { apiUrl } from '../config/api';
 
 const DataContext = createContext();
 
@@ -15,7 +16,7 @@ export const DataProvider = ({ children }) => {
   // Periodic Health Check
   const checkSystemHealth = useCallback(async () => {
     try {
-      const response = await fetch('http://localhost:5000/api/health');
+      const response = await fetch(apiUrl('/health'));
       const data = await response.json();
       setSystemStatus(prev => ({
         ...prev,

@@ -2,8 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import './AdminEvaluation.css';
 import './Assessment.css';
+import { API_BASE } from '../config/api';
 
-const API_BASE = 'http://localhost:5000/api';
 const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const METRICS_SECTION_ID = '__metrics_preview__';
 
@@ -12,7 +12,12 @@ const toSectionKey = (raw = '') => String(raw || '')
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
 
-const prettifyLabel = (raw = '') => String(raw || '').replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+const prettifyLabel = (raw = '') => {
+    let s = String(raw || '').replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
+    // Strip leading section numbers/patterns like "2. ", "Section 2: ", or "2_"
+    s = s.replace(/^(\d+[\.\s_:-]+|section\s+\d+[\.\s_:-]+)/i, '');
+    return s.trim();
+};
 
 const extractProblemQuestions = (text = '') => {
     const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
@@ -1266,7 +1271,7 @@ const AdminEvaluation = () => {
                             {/* ── Inline charts from section content — no backend dependency ── */}
                             {(() => {
                                 const inlineSeries = extractInlineSeries(activeSection.content || '');
-                                if (inlineSeries.length === 0) return null;
+                                if (inlineSeries.length === 0 || showMetricsPreview) return null;
                                 return (
                                     <>
                                         <div style={{
