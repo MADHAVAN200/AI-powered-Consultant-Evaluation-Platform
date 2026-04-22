@@ -7,3 +7,4 @@ langchain-huggingface==0.1.2
 langchain-text-splitters==0.3.6
 sentence-transformers==3.4.1
 pydantic==2.10.6
+pymupdf==1.25.3

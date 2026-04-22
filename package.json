@@ -4,12 +4,18 @@
   "description": "Project with React frontend and Express backend",
   "main": "index.js",
   "scripts": {
-    "start": "concurrently -k -n FRONTEND,BACKEND,RAG \"npm run frontend\" \"npm run backend\" \"npm run rag\"",
+    "start": "concurrently -n FRONTEND,BACKEND,RAG \"npm run frontend\" \"npm run backend\" \"npm run rag\"",
     "frontend": "npm run dev --prefix frontend",
     "backend": "npm run dev --prefix backend",
     "rag": "npm run rag:start --prefix backend",
-    "start:dev": "concurrently -k -n FRONTEND,BACKEND,RAG \"npm run frontend\" \"npm run dev --prefix backend\" \"npm run rag:dev --prefix backend\"",
-    "install-all": "npm install && npm install --prefix frontend && npm install --prefix backend"
+    "start:dev": "concurrently -n FRONTEND,BACKEND,RAG \"npm run frontend\" \"npm run dev --prefix backend\" \"npm run rag:dev --prefix backend\"",
+    "install-all": "npm install && npm install --prefix frontend && npm install --prefix backend",
+    "build": "npm run build --prefix frontend",
+    "prod:setup": "npm run install-all && npm run build",
+    "prod:api": "npm run start:plain --prefix backend",
+    "prod:rag": "npm run rag:start --prefix backend",
+    "prod:up": "concurrently -n BACKEND,RAG \"npm run prod:api\" \"npm run prod:rag\"",
+    "prod:up:no-rag": "npm run prod:api"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
