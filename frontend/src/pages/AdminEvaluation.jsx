@@ -3,6 +3,7 @@ import axios from 'axios';
 import './AdminEvaluation.css';
 import './Assessment.css';
 import { API_BASE } from '../config/api';
+import PageLoader from '../components/PageLoader';
 
 const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const METRICS_SECTION_ID = '__metrics_preview__';
@@ -225,6 +226,84 @@ const parseMetricsEditorText = (text = '') => {
     }
 
     return parsed;
+};
+
+const splitSectionContent = (content = '') => {
+    const text = String(content || '').trim();
+    if (!text) return { summary: '', entries: [] };
+
+    const normalized = text.replace(/\r\n/g, '\n');
+    const lines = normalized
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+    const isInlineHeading = (line) => /:\s*$/.test(line) && line.length < 80 && !/^\d+[.)]\s+/.test(line);
+    const isBullet = (line) => /^(\d+[.)]|[-*•])\s+/.test(line);
+    const cleanBullet = (line) => line.replace(/^\d+[.)]\s*/, '').replace(/^[-*•]\s*/, '').trim();
+
+    const entries = [];
+    const summaryLines = [];
+    let reachedBody = false;
+
+    lines.forEach((line) => {
+        // Handle inline bullet sequences such as: "Revenue Trend: • Jan ... • Feb ..."
+        if (line.includes('•')) {
+            const parts = line.split('•').map((p) => p.trim()).filter(Boolean);
+            const lead = parts.shift();
+
+            if (lead) {
+                if (isInlineHeading(lead)) {
+                    entries.push({ type: 'heading', text: lead.replace(/:\s*$/, '').trim() });
+                } else if (!reachedBody) {
+                    summaryLines.push(lead);
+                } else {
+                    entries.push({ type: 'heading', text: lead.replace(/:\s*$/, '').trim() });
+                }
+            }
+
+            parts.forEach((part) => {
+                const clean = cleanBullet(part);
+                if (clean) entries.push({ type: 'bullet', text: clean });
+            });
+
+            reachedBody = true;
+            return;
+        }
+
+        if (!reachedBody && !isInlineHeading(line) && !isBullet(line)) {
+            summaryLines.push(line);
+            return;
+        }
+
+        reachedBody = true;
+
+        if (isInlineHeading(line)) {
+            entries.push({ type: 'heading', text: line.replace(/:\s*$/, '').trim() });
+            return;
+        }
+
+        entries.push({ type: 'bullet', text: cleanBullet(line) });
+    });
+
+    // Do not repeat full text as summary if we already extracted structured entries.
+    const summarySource = summaryLines.join(' ').trim() || (entries.length === 0 ? text : '');
+    const summary = summarySource.length > 240 ? `${summarySource.slice(0, 240).trim()}...` : summarySource;
+
+    // Remove repeated extracted lines while preserving order.
+    const dedupedEntries = [];
+    const seen = new Set();
+    entries.forEach((entry) => {
+        const key = `${entry.type}:${String(entry.text || '').toLowerCase().trim()}`;
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        dedupedEntries.push(entry);
+    });
+
+    return {
+        summary,
+        entries: dedupedEntries
+    };
 };
 
 const buildSectionsFromDraft = (draft) => {
@@ -1153,7 +1232,7 @@ const AdminEvaluation = () => {
 
                 <div className="resize-handle" title="Preview sidebar" />
 
-                <main className="metrics-workspace" style={{ padding: '24px 40px' }}>
+                <main className="metrics-workspace">
                     <header className="workspace-header" style={{ alignItems: 'flex-start' }}>
                         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
                             <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
@@ -1162,7 +1241,7 @@ const AdminEvaluation = () => {
                                     value={caseTitle}
                                     onChange={(e) => setCaseTitle(e.target.value)}
                                     placeholder="Case Title"
-                                    style={{ margin: 0, padding: '4px 8px', width: '400px', background: 'transparent' }}
+                                    style={{ margin: 0, padding: '4px 8px', width: '100%', minWidth: 0, background: 'transparent' }}
                                 />
                                 <div className="score-chip" style={{ margin: 0, padding: '4px 8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
                                     <div className="score-chip__label" style={{ marginBottom: 0 }}>THRESHOLD</div>
@@ -1182,7 +1261,7 @@ const AdminEvaluation = () => {
                                 value={caseIndustry}
                                 onChange={(e) => setCaseIndustry(e.target.value)}
                                 placeholder="Industry"
-                                style={{ margin: 0, padding: '4px 8px', width: '300px', background: 'transparent' }}
+                                style={{ margin: 0, padding: '4px 8px', width: '100%', minWidth: 0, background: 'transparent' }}
                             />
                             <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
                                 <button
@@ -1496,8 +1575,25 @@ const AdminEvaluation = () => {
         <div className="admin-eval-page">
             <div className="admin-eval-layout">
                 <div className="admin-card import-zone">
-                    <div className="admin-card-title">Upload Case Study PDF</div>
-                    <p className="admin-hint">Upload a PDF. It opens directly in a no-chat case-attempt style preview for admin review and creation.</p>
+                    <div className="import-zone-head">
+                        <span className="import-zone-title-icon" aria-hidden="true">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                <polyline points="14 2 14 8 20 8" />
+                                <line x1="12" y1="18" x2="12" y2="12" />
+                                <polyline points="9 15 12 12 15 15" />
+                            </svg>
+                        </span>
+                        <div className="import-zone-title-block">
+                            <div className="admin-card-title">Upload Case Study PDF</div>
+                            <p className="import-zone-desc">Upload a PDF. It opens directly in a no-chat case-attempt style preview for admin review and creation.</p>
+                        </div>
+                        <div className="import-zone-symbols">
+                            <span className="import-zone-symbol">AI Parse</span>
+                            <span className="import-zone-symbol">Section Detect</span>
+                            <span className="import-zone-symbol">Metrics Ready</span>
+                        </div>
+                    </div>
                     <div className="import-row">
                         <label className={`file-drop-label ${importingPdf ? 'loading' : ''}`}>
                             <input
@@ -1546,19 +1642,44 @@ const AdminEvaluation = () => {
                         <div className="cases-list">
                             {caseStudies.map((row) => (
                                 <div key={row.id} className="case-list-row clickable" onClick={() => handleOpenCaseDetail(row.id)}>
-                                    <div className="case-list-main">
-                                        <div className="case-list-title">{row.title}</div>
-                                        <div className="case-list-meta">
-                                            {row.industry && <span className="case-chip">{row.industry}</span>}
-                                            <span className="case-chip case-mode-chip">{getCaseModeMeta(row).label}</span>
-                                            <span className={`case-chip status-chip ${row.is_active ? 'active' : 'inactive'}`}>
-                                                {row.is_active ? 'ACTIVE' : 'INACTIVE'}
-                                            </span>
+                                    <div className="case-list-leading">
+                                        <span className="case-list-icon" aria-hidden="true">
+                                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                <path d="M8 2h8" />
+                                                <path d="M9 2v4" />
+                                                <path d="M15 2v4" />
+                                                <rect x="4" y="6" width="16" height="16" rx="2" />
+                                                <path d="M8 11h8" />
+                                                <path d="M8 15h5" />
+                                            </svg>
+                                        </span>
+                                        <div className="case-list-main">
+                                            <div className="case-list-title">{row.title}</div>
+                                            <div className="case-list-meta">
+                                                {row.industry && <span className="case-chip">{row.industry}</span>}
+                                                <span className="case-chip case-mode-chip">{getCaseModeMeta(row).label}</span>
+                                                <span className={`case-chip status-chip ${row.is_active ? 'active' : 'inactive'}`}>
+                                                    {row.is_active ? 'ACTIVE' : 'INACTIVE'}
+                                                </span>
+                                            </div>
                                         </div>
                                     </div>
                                     <div className="case-row-actions">
-                                        <button className="icon-action-btn" onClick={(e) => { e.stopPropagation(); handleEditCase(row.id); }} title="Edit Case">✏️</button>
-                                        <button className="icon-action-btn" onClick={(e) => { e.stopPropagation(); handleDeleteCase(row.id); }} title="Delete Case" style={{ color: '#ff4d4f' }}>🗑️</button>
+                                        <button className="icon-action-btn" onClick={(e) => { e.stopPropagation(); handleEditCase(row.id); }} title="Edit Case" aria-label="Edit Case">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                <path d="M12 20h9" />
+                                                <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4 11.5-11.5z" />
+                                            </svg>
+                                        </button>
+                                        <button className="icon-action-btn danger" onClick={(e) => { e.stopPropagation(); handleDeleteCase(row.id); }} title="Delete Case" aria-label="Delete Case">
+                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                <polyline points="3 6 5 6 21 6" />
+                                                <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+                                                <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                                                <line x1="10" y1="11" x2="10" y2="17" />
+                                                <line x1="14" y1="11" x2="14" y2="17" />
+                                            </svg>
+                                        </button>
                                     </div>
                                 </div>
                             ))}
@@ -1567,9 +1688,10 @@ const AdminEvaluation = () => {
                 </div>
 
                 {loadingCaseDetail && (
-                    <div className="save-banner" style={{ border: '1px solid var(--border-default)', background: 'var(--bg-subtle)' }}>
-                        Loading case details...
-                    </div>
+                    <PageLoader
+                        message="Loading Case Details..."
+                        subMessage="Fetching the selected case study and preparing the detail drawer."
+                    />
                 )}
 
                 {selectedCaseDetail && (
@@ -1594,12 +1716,30 @@ const AdminEvaluation = () => {
                                 </button>
                             </div>
 
-                            <div className="drawer-summary" style={{ display: 'grid', gap: '10px' }}>
+                            <div className="drawer-summary">
                                 {drawerSections.map((s) => (
-                                    <div key={`drawer-${s.id}`}>
-                                        <div className="preview-field-label">{s.heading}</div>
-                                        <div className="candidate-case-summary" style={{ marginBottom: 0 }}>{s.content}</div>
-                                    </div>
+                                    <section className="drawer-section-card" key={`drawer-${s.id}`}>
+                                        <div className="drawer-section-title">{s.heading}</div>
+                                        {(() => {
+                                            const { summary, entries } = splitSectionContent(s.content);
+                                            return (
+                                                <>
+                                                    <div className="drawer-section-summary">{summary || 'No details available.'}</div>
+                                                    {entries.length > 0 && (
+                                                        <div className="drawer-entry-list">
+                                                            {entries.map((entry, index) => (
+                                                                entry.type === 'heading' ? (
+                                                                    <div key={`drawer-${s.id}-h-${index}`} className="drawer-inline-heading">{entry.text}</div>
+                                                                ) : (
+                                                                    <div key={`drawer-${s.id}-b-${index}`} className="drawer-bullet-item">{/question/i.test(String(s.heading || '')) ? `${entries.slice(0, index + 1).filter((e) => e.type === 'bullet').length}. ${entry.text}` : entry.text}</div>
+                                                                )
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </>
+                                            );
+                                        })()}
+                                    </section>
                                 ))}
                             </div>
 

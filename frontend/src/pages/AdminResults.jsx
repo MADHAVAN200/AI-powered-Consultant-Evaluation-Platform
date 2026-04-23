@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import './AdminEvaluation.css';
 import { API_BASE } from '../config/api';
+import PageLoader from '../components/PageLoader';
 
 const toSafeArray = (value) => (Array.isArray(value) ? value : []);
 
@@ -33,7 +34,14 @@ const AdminResults = () => {
   }, []);
 
   if (loading) {
-    return <div className="admin-eval-page"><div className="admin-eval-layout">Loading results...</div></div>;
+    return (
+      <div className="admin-eval-page">
+        <PageLoader
+          message="Loading Results..."
+          subMessage="Compiling attempt summaries, scores, and conversation data."
+        />
+      </div>
+    );
   }
 
   return (

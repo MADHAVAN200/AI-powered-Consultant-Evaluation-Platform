@@ -1,11 +1,45 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
+import { useNavigate } from 'react-router-dom';
 import './AdminEvaluation.css';
 import { API_BASE } from '../config/api';
+import PageLoader from '../components/PageLoader';
 
 const AdminDashboard = () => {
+  const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
   const [dashboard, setDashboard] = useState(null);
+
+  const toDisplayName = (email = '') => String(email || '').split('@')[0] || 'unknown-user';
+
+  const getMarksSummary = (row = {}) => {
+    const scores = Array.isArray(row.assessment_scores) ? row.assessment_scores : [];
+    const summed = scores.reduce(
+      (acc, item) => {
+        acc.obtained += Number(item?.total_score ?? item?.score ?? 0) || 0;
+        acc.total += Number(item?.max_score ?? item?.total_possible_score ?? item?.total_marks ?? 0) || 0;
+        return acc;
+      },
+      { obtained: 0, total: 0 }
+    );
+
+    const obtained = Number(row.total_score ?? summed.obtained) || 0;
+    let total = Number(row.total_marks ?? row.max_score ?? summed.total) || 0;
+
+    if (!total) {
+      const threshold = Number(row?.case_studies?.threshold_passing_score ?? row?.threshold_passing_score ?? 0.6);
+      if (obtained > 0 && threshold > 0 && threshold < 1) {
+        total = Math.round(obtained / threshold);
+      }
+    }
+
+    if (!total) total = obtained;
+
+    return {
+      obtained,
+      total
+    };
+  };
 
   const fetchDashboard = async () => {
     setLoading(true);
@@ -26,7 +60,14 @@ const AdminDashboard = () => {
   }, []);
 
   if (loading) {
-    return <div className="admin-eval-page"><div className="admin-eval-layout">Loading dashboard...</div></div>;
+    return (
+      <div className="admin-eval-page">
+        <PageLoader
+          message="Loading Dashboard..."
+          subMessage="Preparing candidate metrics and latest assessment outcomes."
+        />
+      </div>
+    );
   }
 
   return (
@@ -59,28 +100,50 @@ const AdminDashboard = () => {
         </div>
 
         <div className="admin-card">
-          <div className="admin-card-title">RECENT ATTEMPTS</div>
-          <div className="admin-table-wrap">
-            <table className="admin-table">
+          <div className="admin-card-title">RECENT ASSESSMENT RESULTS</div>
+          <div className="dashboard-results-panel" role="region" aria-label="Recent assessment results">
+            <table className="dashboard-results-table">
               <thead>
                 <tr>
-                  <th>Candidate</th>
-                  <th>Case Study</th>
-                  <th>Status</th>
-                  <th>Started</th>
+                  <th>User Name</th>
+                  <th>Assessment</th>
+                  <th>Date Taken</th>
+                  <th>Score</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {(dashboard?.recentAttempts || []).map((row) => (
-                  <tr key={row.id}>
-                    <td>{row.candidate_email}</td>
-                    <td>{row.case_studies?.title || 'Unknown'}</td>
-                    <td><span className={`admin-status ${row.status}`}>{String(row.status || '').toUpperCase()}</span></td>
-                    <td>{new Date(row.created_at).toLocaleString()}</td>
-                  </tr>
-                ))}
+                {(dashboard?.recentAttempts || []).map((row) => {
+                  const marks = getMarksSummary(row);
+                  return (
+                    <tr key={row.id}>
+                      <td>
+                        <div className="dashboard-user-name">{toDisplayName(row.candidate_email)}</div>
+                      </td>
+                      <td>
+                        <div className="dashboard-assessment-title">{row.case_studies?.title || 'Unknown Assessment'}</div>
+                      </td>
+                      <td>
+                        <div className="dashboard-date-cell">{new Date(row.created_at).toLocaleString()}</div>
+                      </td>
+                      <td>
+                        <div className="dashboard-marks-line">
+                          <span className="dashboard-marks-obtained">{marks.obtained}</span>
+                          <span className="dashboard-marks-sep">/</span>
+                          <span className="dashboard-marks-total">{marks.total}</span>
+                          <span className="dashboard-marks-label">marks</span>
+                        </div>
+                      </td>
+                      <td>
+                        <button className="dashboard-action-link" onClick={() => navigate('/admin/results')}>
+                          View Details
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
                 {(dashboard?.recentAttempts || []).length === 0 && (
-                  <tr><td colSpan={4} className="admin-hint">No attempts yet.</td></tr>
+                  <tr><td colSpan={5} className="admin-hint">No attempts yet.</td></tr>
                 )}
               </tbody>
             </table>
