@@ -80,6 +80,108 @@ const renderFormattedMessage = (content) => {
     return elements.length > 0 ? elements : <p className="msg-para">{content}</p>;
 };
 
+const renderSectionContent = (content) => {
+    const lines = String(content || '').replace(/\r\n/g, '\n').split('\n');
+    const elements = [];
+    let listItems = [];
+
+    const flushList = () => {
+        if (listItems.length === 0) return;
+        elements.push(
+            <ul key={`list-${elements.length}`} className="section-inline-list">
+                {listItems.map((item, idx) => (
+                    <li key={`item-${idx}`}>{item}</li>
+                ))}
+            </ul>
+        );
+        listItems = [];
+    };
+
+    lines.forEach((raw, index) => {
+        const line = String(raw || '').trim();
+        if (!line) {
+            flushList();
+            return;
+        }
+
+        const isSubHeading = line.endsWith(':') && line.length <= 90 && !/^\d+[).]\s+/.test(line);
+        const bulletMatch = line.match(/^(?:[-*•]|\d+[).])\s+(.+)$/);
+
+        if (isSubHeading) {
+            flushList();
+            elements.push(
+                <h4 key={`sub-${index}`} className="section-inline-subheading">
+                    {line}
+                </h4>
+            );
+            return;
+        }
+
+        if (bulletMatch) {
+            listItems.push(bulletMatch[1].trim());
+            return;
+        }
+
+        flushList();
+        elements.push(
+            <p key={`para-${index}`} className="section-inline-paragraph">
+                {line}
+            </p>
+        );
+    });
+
+    flushList();
+    return elements;
+};
+
+const parseSectionCards = (content = '') => {
+    const lines = String(content || '').replace(/\r\n/g, '\n').split('\n').map((line) => line.trim());
+    const blocks = [];
+    const summaryLines = [];
+    let currentBlock = null;
+
+    const flushBlock = () => {
+        if (!currentBlock) return;
+        if (currentBlock.heading && currentBlock.items.length > 0) {
+            blocks.push(currentBlock);
+        }
+        currentBlock = null;
+    };
+
+    for (const line of lines) {
+        if (!line) {
+            flushBlock();
+            continue;
+        }
+
+        const isSubHeading = line.endsWith(':') && line.length <= 90 && !/^\d+[).]\s+/.test(line);
+        const bulletMatch = line.match(/^(?:[-*•]|\d+[).])\s+(.+)$/);
+
+        if (isSubHeading) {
+            flushBlock();
+            currentBlock = {
+                heading: line.replace(/:\s*$/, '').trim(),
+                items: []
+            };
+            continue;
+        }
+
+        const cleaned = bulletMatch ? bulletMatch[1].trim() : line;
+        if (currentBlock) {
+            currentBlock.items.push(cleaned);
+        } else {
+            summaryLines.push(cleaned);
+        }
+    }
+
+    flushBlock();
+
+    return {
+        summary: summaryLines.join(' ').trim(),
+        blocks
+    };
+};
+
 // ─── Sidebar Section Card ──────────────────────────────────────────────────
 const SidebarCard = ({ label, variant = 'default', children }) => (
     <div className={`sidebar-card sidebar-card--${variant}`}>
@@ -1664,9 +1766,6 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                                 onClick={() => setActiveCaseSection(s.id)}
                             >
                                 <span style={{ flex: 1, textAlign: 'left' }}>{s.heading || 'Untitled Section'}</span>
-                                {s.role && s.role !== 'other' && (
-                                    <span className={`role-pill role-pill--${s.role}`}>{s.role}</span>
-                                )}
                             </button>
                         ))}
                         {mockDrillEnabled && (
@@ -1717,9 +1816,10 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
             <main className="metrics-workspace">
                 <header className="workspace-header">
                     <div>
-                        <p className="workspace-tag">AurumCart Case Evaluation</p>
                         <h1 className="workspace-title">{caseStudy.title}</h1>
-                        <p className="workspace-subtitle">{caseStudy.industry || 'Business Strategy'} · Metrics-first assessment cockpit</p>
+                        {caseStudy.industry && (
+                            <p className="workspace-subtitle">{caseStudy.industry}</p>
+                        )}
                     </div>
                     <div className="workspace-actions">
                         <div className="score-chip">
@@ -1739,9 +1839,34 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                 <section className="case-content-pane" aria-label={`${activeSectionData.heading} content`}>
                     <article className="main-section-card">
                         <h3 style={{ textTransform: 'uppercase', marginBottom: '16px', letterSpacing: '0.04em' }}>{activeSectionData.heading}</h3>
-                        <div style={{ whiteSpace: 'pre-wrap', lineHeight: '1.6', fontSize: '0.9rem', color: 'var(--text-primary)', marginBottom: '24px' }}>
-                            {activeSectionData.content}
-                        </div>
+                        {(() => {
+                            const { summary, blocks } = parseSectionCards(activeSectionData.content);
+                            if (blocks.length === 0) {
+                                return (
+                                    <div className="section-inline-content">
+                                        {renderSectionContent(activeSectionData.content)}
+                                    </div>
+                                );
+                            }
+
+                            return (
+                                <div className="section-breakdown-grid">
+                                    {summary && <div className="section-breakdown-summary">{summary}</div>}
+                                    {blocks.map((block, index) => (
+                                        <article className="section-breakdown-card" key={`${activeSectionData.id}-block-${index}`}>
+                                            <div className="section-breakdown-card__title">{block.heading}</div>
+                                            <div className="section-breakdown-card__body">
+                                                {block.items.map((item, itemIndex) => (
+                                                    <div className="section-breakdown-item" key={`${activeSectionData.id}-item-${index}-${itemIndex}`}>
+                                                        {item}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </article>
+                                    ))}
+                                </div>
+                            );
+                        })()}
                     </article>
 
                     {activeInlineSeries.length > 0 && !sectionHasDataMetrics && !isMetricsSection(activeSectionData) && (

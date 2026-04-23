@@ -175,6 +175,87 @@ body.assessment-lock { overflow: hidden; height: 100vh; }
     padding-left: 4px;
 }
 
+/* ── Section Breakdown Cards ───────────────────────────────── */
+.section-role-flag-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+}
+
+.section-role-flag {
+    font-size: 0.58rem;
+    font-weight: 900;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-radius: 999px;
+    padding: 3px 8px;
+    border: 1px solid var(--border-default);
+    background: var(--bg-subtle);
+    color: var(--text-secondary);
+}
+
+.section-role-flag--context { color: #58a6ff; border-color: rgba(88, 166, 255, 0.35); background: rgba(88, 166, 255, 0.08); }
+.section-role-flag--problem { color: #f85149; border-color: rgba(248, 81, 73, 0.35); background: rgba(248, 81, 73, 0.08); }
+.section-role-flag--prompt { color: #3fb950; border-color: rgba(63, 185, 80, 0.35); background: rgba(63, 185, 80, 0.08); }
+.section-role-flag--data { color: #d4a72c; border-color: rgba(212, 167, 44, 0.35); background: rgba(212, 167, 44, 0.1); }
+.section-role-flag--kind { color: var(--text-secondary); }
+
+.section-breakdown-grid {
+    display: grid;
+    gap: 10px;
+    margin-top: 18px;
+}
+
+.section-breakdown-summary {
+    border: 1px solid var(--border-default);
+    background: var(--bg-subtle);
+    border-radius: 10px;
+    padding: 10px 12px;
+    font-size: 0.82rem;
+    line-height: 1.55;
+    color: var(--text-secondary);
+}
+
+.section-breakdown-card {
+    border: 1px solid var(--border-default);
+    border-radius: 10px;
+    background: var(--bg-subtle);
+    padding: 10px 12px;
+    display: grid;
+    gap: 8px;
+}
+
+.section-breakdown-card__title {
+    font-size: 0.72rem;
+    font-weight: 900;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-primary);
+}
+
+.section-breakdown-card__body {
+    display: grid;
+    gap: 7px;
+}
+
+.section-breakdown-item {
+    position: relative;
+    padding-left: 14px;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    color: var(--text-primary);
+}
+
+.section-breakdown-item::before {
+    content: '•';
+    position: absolute;
+    left: 0;
+    top: 0;
+    color: var(--accent-primary);
+    font-weight: 900;
+}
+
 /* ── Insights ────────────────────────────────────────────────── */
 .insight-list {
     margin: 0;
@@ -967,12 +1048,12 @@ body.assessment-lock { overflow: hidden; height: 100vh; }
     font-size: 0.68rem;
     font-weight: 800;
     padding: 0 12px;
-    border-radius: 4px;
+    border-radius: 8px;
     cursor: pointer;
     transition: all 0.2s;
     letter-spacing: 0;
     height: 34px;
-    min-width: 64px;
+    min-width: 72px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -1261,10 +1342,22 @@ body.assessment-lock { overflow: hidden; height: 100vh; }
     height: 44px;
     border-radius: 999px;
     background: #147fe3;
+    color: #ffffff;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
+    box-shadow: 0 6px 16px rgba(20, 127, 227, 0.28);
+}
+
+.prompt-send-btn svg {
+    display: block;
+    width: 26px;
+    height: 26px;
+}
+
+.prompt-send-btn.active {
+    color: #ffffff;
 }
 
 .input-hint {
@@ -1499,9 +1592,41 @@ body.assessment-lock { overflow: hidden; height: 100vh; }
 
 .main-section-card {
     border: none;
-    padding: 0;
+    padding: 0 12px;
     background: transparent;
     animation: fadeInUp 0.2s ease;
+}
+
+.section-inline-content {
+    margin-bottom: 24px;
+}
+
+.section-inline-subheading {
+    margin: 14px 0 6px;
+    font-size: 0.95rem;
+    font-weight: 800;
+    color: var(--text-primary);
+    letter-spacing: 0.01em;
+}
+
+.section-inline-paragraph {
+    margin: 0 0 10px;
+    font-size: 0.9rem;
+    line-height: 1.62;
+    color: var(--text-primary);
+}
+
+.section-inline-list {
+    margin: 0 0 10px 18px;
+    padding: 0;
+    display: grid;
+    gap: 4px;
+}
+
+.section-inline-list li {
+    font-size: 0.88rem;
+    line-height: 1.58;
+    color: var(--text-primary);
 }
 
 .brief-subheading {
@@ -1560,6 +1685,20 @@ body.assessment-lock { overflow: hidden; height: 100vh; }
     display: flex;
     align-items: center;
     gap: 8px;
+    flex-wrap: nowrap;
+}
+
+.workspace-actions .assessment-theme-toggle,
+.workspace-actions .session-status-badge,
+.workspace-actions .btn-exit {
+    height: 34px;
+    min-width: 84px;
+    border-radius: 8px;
+    padding: 0 12px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    box-sizing: border-box;
 }
 
 .workspace-actions .assessment-theme-toggle {

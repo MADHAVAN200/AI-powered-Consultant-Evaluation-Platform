@@ -3,6 +3,7 @@ import axios from 'axios';
 import { useData } from '../context/DataContext';
 import './AdminEvaluation.css';
 import { API_BASE } from '../config/api';
+import PageLoader from '../components/PageLoader';
 
 const CandidateDashboard = () => {
   const { userEmail } = useData();
@@ -26,7 +27,14 @@ const CandidateDashboard = () => {
   }, [userEmail]);
 
   if (loading) {
-    return <div className="admin-eval-page"><div className="admin-eval-layout">Loading candidate dashboard...</div></div>;
+    return (
+      <div className="admin-eval-page">
+        <PageLoader
+          message="Loading Dashboard..."
+          subMessage="Preparing your latest attempts, outcomes, and trend metrics."
+        />
+      </div>
+    );
   }
 
   return (
@@ -57,7 +65,7 @@ const CandidateDashboard = () => {
           </div>
         </div>
 
-        <div className="admin-card">
+        <div className="recent-submissions-panel">
           <div className="admin-card-title">RECENT SUBMISSIONS</div>
           <div className="admin-table-wrap">
             <table className="admin-table">

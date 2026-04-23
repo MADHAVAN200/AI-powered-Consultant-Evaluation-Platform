@@ -3,6 +3,7 @@ import axios from 'axios';
 import { useData } from '../context/DataContext';
 import './AdminEvaluation.css';
 import { API_BASE } from '../config/api';
+import PageLoader from '../components/PageLoader';
 
 const toSafeArray = (value) => (Array.isArray(value) ? value : []);
 
@@ -29,7 +30,14 @@ const CandidateResults = () => {
   }, [userEmail]);
 
   if (loading) {
-    return <div className="admin-eval-page"><div className="admin-eval-layout">Loading candidate results...</div></div>;
+    return (
+      <div className="admin-eval-page">
+        <PageLoader
+          message="Loading Results..."
+          subMessage="Collecting your case outcomes, scores, and conversation history."
+        />
+      </div>
+    );
   }
 
   return (
