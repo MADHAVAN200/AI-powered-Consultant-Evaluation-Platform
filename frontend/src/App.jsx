@@ -27,22 +27,35 @@ const getInitialTheme = () => {
 };
 
 const adminNavItems = [
-  { path: '/admin/dashboard', id: 'dashboard', label: 'DASHBOARD' },
-  { path: '/admin/cases', id: 'cases', label: 'CASE STUDIES' },
-  { path: '/admin/results', id: 'results', label: 'RESULTS & ANALYTICS' }
+  { path: '/admin/dashboard', id: 'dashboard', label: 'Dashboard', icon: 'dashboard' },
+  { path: '/admin/cases', id: 'cases', label: 'Case Studies', icon: 'cases' },
+  { path: '/admin/results', id: 'results', label: 'Results & Analytics', icon: 'results' }
 ];
 
 const candidateNavItems = [
-  { path: '/candidate/dashboard', id: 'candidate-dashboard', label: 'CANDIDATE DASHBOARD' },
-  { path: '/candidate/cases', id: 'candidate-cases', label: 'CASE STUDIES' },
-  { path: '/candidate/results', id: 'candidate-results', label: 'MY RESULTS' }
+  { path: '/candidate/dashboard', id: 'dashboard', label: 'Dashboard', icon: 'dashboard' },
+  { path: '/candidate/cases', id: 'cases', label: 'Case Studies', icon: 'cases' },
+  { path: '/candidate/results', id: 'results', label: 'My Results', icon: 'results' }
 ];
 
+const NavIcon = ({ type, color }) => {
+  const icons = {
+    dashboard: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>,
+    cases: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>,
+    results: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>,
+    vm: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>,
+    console: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>,
+    labs: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.5 19a3.5 3.5 0 0 0 0-7h-1.5a7 7 0 1 0-11.76 5.33"></path></svg>,
+    bank: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+  };
+  return <span className={`nav-icon-wrapper ${type}`} style={{ color: color }}>{icons[type] || icons.dashboard}</span>;
+};
+
 const Sidebar = ({ navItems }) => {
-  const { userEmail, logoutUser } = useData();
+  const { userEmail, logoutUser, userRole } = useData();
   return (
     <aside className="sidebar">
-      <div className="sidebar-logo">AI-POWERED CONSULTANT</div>
+      <div className="sidebar-logo">AI Consultant</div>
       <nav className="sidebar-nav">
         {navItems.map((item) => (
           <NavLink
@@ -50,19 +63,26 @@ const Sidebar = ({ navItems }) => {
             to={item.path}
             className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}
           >
-            {item.label}
+            <NavIcon type={item.icon} />
+            <span className="nav-label">{item.label}</span>
           </NavLink>
         ))}
       </nav>
       <div className="sidebar-user-section">
-        <div className="sidebar-user-info">
-          <div className="sidebar-avatar">{userEmail ? userEmail[0].toUpperCase() : 'U'}</div>
-          <div className="sidebar-user-details">
-            <div className="sidebar-label">CONNECTED</div>
-            <div className="sidebar-email">{userEmail}</div>
+        <div className="sidebar-user-card">
+          <div className="sidebar-user-info">
+            <div className="sidebar-avatar-wrapper">
+              <img src={`https://api.dicebear.com/7.x/avataaars/svg?seed=${userEmail}`} alt="Avatar" className="sidebar-avatar-img" />
+            </div>
+            <div className="sidebar-user-details">
+              <div className="sidebar-user-name">{userEmail ? userEmail.split('@')[0] : 'User'}</div>
+              <div className="sidebar-user-role">{userRole?.toUpperCase() || 'ADMIN'}</div>
+            </div>
+            <button onClick={logoutUser} className="sidebar-logout-btn">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+            </button>
           </div>
         </div>
-        <button onClick={logoutUser} className="sidebar-logout">LOGOUT</button>
       </div>
     </aside>
   );
@@ -75,17 +95,28 @@ const TopBar = ({ theme, toggleTheme }) => {
     ? adminNavItems
     : userRole === 'candidate'
       ? candidateNavItems
-      : [{ path: '/', id: 'assessment', label: 'CONSULTANT EVALUATION' }];
+      : [{ path: '/', id: 'assessment', label: 'Consultant Evaluation', icon: 'cases' }];
   const currentPage = navItems.find(item => item.path === location.pathname) || navItems[0];
   const pageTitle = currentPage.label;
 
   return (
     <header className="topbar">
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-        <h2 className="header-title">{pageTitle}</h2>
-      </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-        <button className="theme-toggle" onClick={toggleTheme}>{theme === 'light' ? 'DARK' : 'LIGHT'}</button>
+      <div className="topbar-pill">
+        <div className="topbar-left">
+          <h2 className="header-title">{pageTitle}</h2>
+        </div>
+        <div className="topbar-right">
+          <button className="topbar-icon-btn">
+             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 4v6h-6"></path><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+          </button>
+          <button className="topbar-icon-btn theme-toggle-btn" onClick={toggleTheme}>
+            {theme === 'light' ? (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+            ) : (
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+            )}
+          </button>
+        </div>
       </div>
     </header>
   );
@@ -132,7 +163,6 @@ function AppContent() {
   const isPublicAssessment = currentPath.startsWith('/assess/invite/');
   const isCandidateAssessment = currentPath.startsWith('/candidate/assessment/');
   const isAssessmentRoute = isPublicAssessment || isCandidateAssessment;
-  const isAdminCasesRoute = currentPath === '/admin/cases';
 
   if (!userEmail && !isPublicAssessment) {
       return <LoginOverlay theme={theme} toggleTheme={toggleTheme} />;
@@ -146,8 +176,8 @@ function AppContent() {
     <div className="app-container">
       {showSidebar && <Sidebar navItems={navItems} />}
       <main className={`main-content ${showSidebar ? '' : 'main-content-full'}`}>
-        {!isAssessmentRoute && !isAdminCasesRoute && <TopBar theme={theme} toggleTheme={toggleTheme} />}
-        <div className={`content-area ${isAssessmentRoute ? 'assessment-route-content' : ''} ${isAdminCasesRoute ? 'admin-cases-route-content' : ''}`}>
+        {!isAssessmentRoute && <TopBar theme={theme} toggleTheme={toggleTheme} />}
+        <div className={`content-area ${isAssessmentRoute ? 'assessment-route-content' : ''}`}>
           <Routes>
             <Route path="/" element={<Navigate to={homePath} replace />} />
 
