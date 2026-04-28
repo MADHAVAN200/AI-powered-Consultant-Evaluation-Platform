@@ -1,5 +1,8 @@
 import os
 os.environ["ANONYMIZED_TELEMETRY"] = "false"
+os.environ.setdefault("POSTHOG_DISABLED", "1")
+os.environ.setdefault("CHROMA_TELEMETRY_ENABLED", "false")
+os.environ.setdefault("CHROMA_OTEL_COLLECTION_ENABLED", "false")
 
 import json
 import re

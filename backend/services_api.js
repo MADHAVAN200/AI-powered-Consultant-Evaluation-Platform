@@ -21,6 +21,18 @@ const DEMO_CASE_STUDY = {
         delayed_orders_pct: [12, 14, 16, 18, 20, 22],
         complaints_pct: [5, 6, 8, 10, 13, 17]
     },
+    parsed_sections: {
+        _sections: [
+            {
+                heading: 'Case Context',
+                content: 'AurumCart is experiencing strong revenue growth but has recently started reporting losses. Analyze financial, operational and customer metrics to diagnose why profitability is declining.'
+            },
+            {
+                heading: 'Questions',
+                content: '1. Identify root causes of declining profitability.\n2. Recommend a structured action plan to restore profitability within 6 months.\n3. Highlight key risks in your approach.'
+            }
+        ]
+    },
     threshold_passing_score: 0.6,
     is_active: true
 };
@@ -62,7 +74,7 @@ const deriveResultStatus = (row = {}) => {
     const isPassing = Boolean(scoreObj?.is_passing);
     const total = Number(row?.total_score || extractTotalScore(row));
     if (isPassing || total >= PASSING_MARKS) return 'pass';
-    if (String(row?.status || '').toLowerCase() === 'active' && total <= 0) return 'pending';
+    if (String(row?.status || '').toLowerCase() === 'active') return 'pending';
     return 'fail';
 };
 
@@ -1222,8 +1234,9 @@ ${extractionSource}`;
                 throw new ApiError(403, 'Session is not active');
             }
 
+            const activeQuestionId = activeQuestion?.id || 'global';
             const history = Array.isArray(session.chat_history) ? [...session.chat_history] : [];
-            history.push({ role: 'user', content: userMessage });
+            history.push({ role: 'user', content: userMessage, questionId: activeQuestionId });
 
             const normalizedQuestion = normalizeQuestionContext(activeQuestion);
             const evaluated = await runAiEvaluation(
@@ -1249,7 +1262,7 @@ ${extractionSource}`;
                         : 'active';
 
             const aiResponse = evaluated.response;
-            history.push({ role: 'assistant', content: aiResponse });
+            history.push({ role: 'assistant', content: aiResponse, questionId: activeQuestionId });
 
             const updatedPayload = {
                 status: finalStatus,
@@ -1540,8 +1553,21 @@ ${extractionSource}`;
                 const avgScoreValues = evaluatedRows.map((r) => Number(r.total_score || 0)).filter((n) => n > 0);
                 const avgScore = avgScoreValues.length ? Number((avgScoreValues.reduce((s, n) => s + n, 0) / avgScoreValues.length).toFixed(1)) : 0;
 
-                const { data: caseStudies, error: caseError } = await supabase.from('case_studies').select('id').eq('is_active', true);
+                const { data: caseStudies, error: caseError } = await supabase
+                    .from('case_studies')
+                    .select('id, title, industry, context, created_at')
+                    .eq('is_active', true)
+                    .order('created_at', { ascending: false });
                 if (caseError) throw caseError;
+
+                const dashboardCaseStudies = (caseStudies || []).map(cs => {
+                    const attempts = rows.filter(r => r.case_study_id === cs.id);
+                    return {
+                        ...cs,
+                        attemptCount: attempts.length,
+                        latestStatus: attempts[0]?.result_status || null
+                    };
+                });
 
                 return {
                     success: true,
@@ -1550,8 +1576,9 @@ ${extractionSource}`;
                         passCount,
                         failCount,
                         avgScore,
-                        activeCaseStudies: (caseStudies || []).length,
-                        recent: evaluatedRows.slice(0, 10)
+                        activeCaseStudies: dashboardCaseStudies.length,
+                        caseStudies: dashboardCaseStudies.slice(0, 5),
+                        recent: rows.slice(0, 5)
                     }
                 };
             } catch (error) {
@@ -1627,11 +1654,15 @@ ${extractionSource}`;
             try {
                 const { data, error } = await supabase
                     .from('assessment_sessions')
-                    .select('id, created_at, completed_at, status, strikes, current_step, chat_history, case_studies(title), assessment_scores(*)')
+                    .select('id, case_study_id, created_at, completed_at, status, strikes, current_step, chat_history, case_studies(title), assessment_scores(*)')
                     .eq('candidate_email', email)
                     .order('created_at', { ascending: false });
                 if (error) throw error;
-                return { success: true, results: attachResultStatus(attachTotalScore(data || [])) };
+                const results = (data || []).map(r => {
+                    const { chat_history, ...rest } = r;
+                    return { ...rest, chat_count: Array.isArray(chat_history) ? chat_history.length : 0 };
+                });
+                return { success: true, results: attachResultStatus(attachTotalScore(results)) };
             } catch (error) {
                 if (isMissingTableError(error.message)) {
                     const fallback = Array.from(inMemoryDemoSessions.values())
@@ -2019,36 +2050,74 @@ ${extractionSource}`;
         },
 
         async adminDashboard() {
-            const [analyticsRes, recentRes, casesRes] = await Promise.all([
-                supabase.from('assessment_sessions').select('id, status, case_study_id'),
-                supabase.from('assessment_sessions').select('id, candidate_email, status, created_at, case_study_id, case_studies(title)').order('created_at', { ascending: false }).limit(10),
+            const [sessionsRes, casesRes] = await Promise.all([
+                supabase.from('assessment_sessions').select('id, case_study_id, candidate_email, status, created_at, completed_at, case_studies(title)').order('created_at', { ascending: false }),
                 supabase.from('case_studies').select('id, title, is_active').order('created_at', { ascending: false })
             ]);
 
-            if (analyticsRes.error) throw new ApiError(500, analyticsRes.error.message);
-            if (recentRes.error) throw new ApiError(500, recentRes.error.message);
+            if (sessionsRes.error) throw new ApiError(500, sessionsRes.error.message);
             if (casesRes.error) throw new ApiError(500, casesRes.error.message);
 
-            const sessions = analyticsRes.data || [];
-            const totalCandidates = sessions.length;
-            const completedCount = sessions.filter((s) => s.status === 'completed').length;
-            const disqualifiedCount = sessions.filter((s) => s.status === 'disqualified').length;
-            const activeSessions = sessions.filter((s) => s.status === 'active').length;
+            const sessions = sessionsRes.data || [];
+            const cases = casesRes.data || [];
 
-            const { data: scores, error: scoreError } = await supabase.from('assessment_scores').select('total_score');
-            if (scoreError) throw new ApiError(500, scoreError.message);
-            const avgScore = scores.length ? Number((scores.reduce((sum, row) => sum + Number(row.total_score || 0), 0) / scores.length).toFixed(1)) : 0;
+            // Unique Candidates Count
+            const uniqueEmails = new Set(sessions.map(s => s.candidate_email));
+            const totalCandidates = uniqueEmails.size;
+            const totalAssessments = cases.length;
+            const totalSubmissions = sessions.length;
+
+            // Average Completion Time
+            const completedSessions = sessions.filter(s => s.status === 'completed' && s.completed_at && s.created_at);
+            const totalTimeMs = completedSessions.reduce((sum, s) => {
+                const duration = new Date(s.completed_at) - new Date(s.created_at);
+                return sum + (duration > 0 ? duration : 0);
+            }, 0);
+            const avgTimeMin = completedSessions.length ? Number((totalTimeMs / completedSessions.length / 60000).toFixed(1)) : 0;
+
+            // Activity Trend (Last 7 Days)
+            const daysShort = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'];
+            const activityTrend = [];
+            const now = new Date();
+            for (let i = 6; i >= 0; i--) {
+                const d = new Date(now);
+                d.setDate(d.getDate() - i);
+                const dayName = daysShort[d.getDay()];
+                const dateStr = d.toISOString().split('T')[0];
+                const count = sessions.filter(s => {
+                    const sessionDate = new Date(s.created_at).toISOString().split('T')[0];
+                    return sessionDate === dateStr;
+                }).length;
+                activityTrend.push({ day: dayName, count, date: dateStr });
+            }
+
+            // Recent Activity Feed
+            const recentActivity = sessions.slice(0, 12).map(s => {
+                const status = String(s.status || 'started').toLowerCase();
+                const userName = s.candidate_email.split('@')[0];
+                const caseTitle = s.case_studies?.title || 'a case study';
+                return {
+                    id: s.id,
+                    user: userName,
+                    action: `${status === 'completed' ? 'completed' : status === 'disqualified' ? 'failed' : 'started'} ${caseTitle}`,
+                    timestamp: s.created_at,
+                    status
+                };
+            });
 
             return {
                 success: true,
                 dashboard: {
-                    totalCandidates,
-                    completedCount,
-                    disqualifiedCount,
-                    activeSessions,
-                    avgScore,
-                    recentAttempts: recentRes.data || [],
-                    caseStudies: casesRes.data || []
+                    stats: {
+                        totalCandidates,
+                        totalAssessments,
+                        totalSubmissions,
+                        avgTimeMin
+                    },
+                    activityTrend,
+                    recentActivity,
+                    recentAttempts: sessions.slice(0, 10), // Legacy support
+                    caseStudies: cases.slice(0, 5)
                 }
             };
         },
@@ -2080,7 +2149,7 @@ ${extractionSource}`;
 
             const { data: sessions, error: sessionError } = await supabase
                 .from('assessment_sessions')
-                .select('id, candidate_email, status, strikes, current_step, created_at, completed_at, chat_history, assessment_scores(*)')
+                .select('id, case_study_id, candidate_email, status, strikes, current_step, created_at, completed_at, chat_history, assessment_scores(*)')
                 .eq('case_study_id', caseStudyId)
                 .order('created_at', { ascending: false });
             if (sessionError) throw new ApiError(500, sessionError.message);
@@ -2100,10 +2169,14 @@ ${extractionSource}`;
         async adminResults() {
             const { data, error } = await supabase
                 .from('assessment_sessions')
-                .select('id, candidate_email, status, strikes, current_step, created_at, completed_at, chat_history, case_studies(title), assessment_scores(*)')
+                .select('id, case_study_id, candidate_email, status, strikes, current_step, created_at, completed_at, chat_history, case_studies(title), assessment_scores(*)')
                 .order('created_at', { ascending: false });
             if (error) throw new ApiError(500, error.message);
-            return { success: true, results: attachResultStatus(attachTotalScore(data || [])) };
+            const results = (data || []).map(r => {
+                const { chat_history, ...rest } = r;
+                return { ...rest, chat_count: Array.isArray(chat_history) ? chat_history.length : 0 };
+            });
+            return { success: true, results: attachResultStatus(attachTotalScore(results)) };
         },
 
         async adminResultDetail(sessionId) {
