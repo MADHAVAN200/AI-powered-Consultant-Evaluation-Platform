@@ -1,9 +1,12 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import axios from 'axios';
 import './AdminEvaluation.css';
 import './Assessment.css';
 import { API_BASE } from '../config/api';
 import PageLoader from '../components/PageLoader';
+import MetricChart from '../components/MetricLineChart';
+import CaseStudyDrawer from '../components/CaseStudyDrawer';
+import SidebarCard from '../components/SidebarCard';
 
 const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const METRICS_SECTION_ID = '__metrics_preview__';
@@ -15,7 +18,6 @@ const toSectionKey = (raw = '') => String(raw || '')
 
 const prettifyLabel = (raw = '') => {
     let s = String(raw || '').replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
-    // Strip leading section numbers/patterns like "2. ", "Section 2: ", or "2_"
     s = s.replace(/^(\d+[\.\s_:-]+|section\s+\d+[\.\s_:-]+)/i, '');
     return s.trim();
 };
@@ -36,12 +38,6 @@ const extractProblemQuestions = (text = '') => {
         .filter((q) => q.length > 8);
 };
 
-/**
- * extractInlineSeries(text)
- * Scans section content for "bullet label: number unit" patterns.
- * Groups consecutive such lines together as a named data series.
- * Returns: [ { groupLabel, points: [{label, value}], unit } ]
- */
 const extractInlineSeries = (text = '') => {
     const lines = String(text || '').split('\n').map((l) => l.trim()).filter(Boolean);
     const groups = [];
@@ -49,40 +45,39 @@ const extractInlineSeries = (text = '') => {
     let pendingLabel = '';
 
     for (const line of lines) {
-        // Strip leading bullet/dash chars
-        const stripped = line.replace(/^[•\-\*]\s*/, '').trim();
-
-        // Match "Label: number optional_unit" e.g. "January: 26 Lakhs" or "Revenue: 1.2 Cr"
-        const kvMatch = stripped.match(/^([^:]{1,60}):\s*([-+]?\d[\d,.]*(?:\.\d+)?)\s*([A-Za-z%/]*)\s*$/);
+        const stripped = line.replace(/^[•\-\*●]\s*/, '').trim();
+        const kvMatch = stripped.match(/^([^:]{1,60}):\s*([-+]?\d[\d,.]*(?:\.\d+)?)\s*([A-Za-z%/]*)\s*(?:.*)?$/);
         if (kvMatch) {
             const pointLabel = kvMatch[1].trim();
-            const value = parseFloat(kvMatch[2].replace(/,/g, ''));
+            let value = parseFloat(kvMatch[2].replace(/,/g, ''));
+            const unitSuffix = (kvMatch[3] || '').toLowerCase();
+
             if (Number.isFinite(value)) {
+                if (unitSuffix === 'cr') value *= 100;
+                else if (unitSuffix === 'm') value *= 10;
+                else if (unitSuffix === 'k') value /= 100;
+
                 if (!currentGroup) {
-                    currentGroup = { groupLabel: pendingLabel || 'Series', points: [] };
+                    currentGroup = { groupLabel: pendingLabel || 'Series', points: [], unit: unitSuffix || 'count' };
                     groups.push(currentGroup);
                 }
-                currentGroup.points.push({ label: pointLabel, value });
+                currentGroup.points.push({ label: pointLabel, value, rawValue: parseFloat(kvMatch[2].replace(/,/g, '')), unit: unitSuffix });
                 continue;
             }
         }
 
-        // Non-numeric line: flush group if it has < 2 points, reset pending label
         if (currentGroup) {
             if (currentGroup.points.length < 2) groups.pop();
             currentGroup = null;
         }
-        // Use bold subheadings / short lines as group labels for the NEXT series
         if (stripped.length > 0 && stripped.length < 60 && !stripped.includes('.') && stripped.endsWith(':')) {
             pendingLabel = stripped.slice(0, -1).trim();
-        } else if (stripped.length > 0 && stripped.length < 60) {
+        } else if (stripped.length > 0 && stripped.length < 60 && !stripped.includes('•')) {
             pendingLabel = stripped;
         }
     }
 
-    // Flush final group
     if (currentGroup && currentGroup.points.length < 2) groups.pop();
-
     return groups.filter((g) => g.points.length >= 2);
 };
 
@@ -232,77 +227,47 @@ const splitSectionContent = (content = '') => {
     const text = String(content || '').trim();
     if (!text) return { summary: '', entries: [] };
 
-    const normalized = text.replace(/\r\n/g, '\n');
+    // Handle single-line bullet strings using " ● " or " • "
+    // We convert these into standard newlines with a bullet marker
+    const normalized = text
+        .replace(/\s*[●•]\s*/g, '\n- ')
+        .replace(/\r\n/g, '\n');
+
     const lines = normalized
         .split('\n')
         .map((line) => line.trim())
         .filter(Boolean);
 
     const isInlineHeading = (line) => /:\s*$/.test(line) && line.length < 80 && !/^\d+[.)]\s+/.test(line);
-    const isBullet = (line) => /^(\d+[.)]|[-*•])\s+/.test(line);
-    const cleanBullet = (line) => line.replace(/^\d+[.)]\s*/, '').replace(/^[-*•]\s*/, '').trim();
+    const isBullet = (line) => /^(\d+[.)]|[-* ])\s+/.test(line);
+
+    // Improved cleanBullet: preserve numbers if the user wants "proper points format"
+    const cleanBullet = (line) => {
+        if (/^\d+[.)]\s+/.test(line)) return line; // Keep numbers like "1. "
+        return line.replace(/^[-* ]\s*/, '').trim();
+    };
 
     const entries = [];
     const summaryLines = [];
     let reachedBody = false;
 
     lines.forEach((line) => {
-        // Handle inline bullet sequences such as: "Revenue Trend: • Jan ... • Feb ..."
-        if (line.includes('•')) {
-            const parts = line.split('•').map((p) => p.trim()).filter(Boolean);
-            const lead = parts.shift();
-
-            if (lead) {
-                if (isInlineHeading(lead)) {
-                    entries.push({ type: 'heading', text: lead.replace(/:\s*$/, '').trim() });
-                } else if (!reachedBody) {
-                    summaryLines.push(lead);
-                } else {
-                    entries.push({ type: 'heading', text: lead.replace(/:\s*$/, '').trim() });
-                }
-            }
-
-            parts.forEach((part) => {
-                const clean = cleanBullet(part);
-                if (clean) entries.push({ type: 'bullet', text: clean });
-            });
-
-            reachedBody = true;
-            return;
-        }
-
-        if (!reachedBody && !isInlineHeading(line) && !isBullet(line)) {
-            summaryLines.push(line);
-            return;
-        }
-
-        reachedBody = true;
-
         if (isInlineHeading(line)) {
-            entries.push({ type: 'heading', text: line.replace(/:\s*$/, '').trim() });
-            return;
+            reachedBody = true;
+            entries.push({ type: 'heading', text: line });
+        } else if (isBullet(line)) {
+            reachedBody = true;
+            entries.push({ type: 'bullet', text: cleanBullet(line) });
+        } else if (!reachedBody) {
+            summaryLines.push(line);
+        } else {
+            entries.push({ type: 'text', text: line });
         }
-
-        entries.push({ type: 'bullet', text: cleanBullet(line) });
-    });
-
-    // Do not repeat full text as summary if we already extracted structured entries.
-    const summarySource = summaryLines.join(' ').trim() || (entries.length === 0 ? text : '');
-    const summary = summarySource.length > 240 ? `${summarySource.slice(0, 240).trim()}...` : summarySource;
-
-    // Remove repeated extracted lines while preserving order.
-    const dedupedEntries = [];
-    const seen = new Set();
-    entries.forEach((entry) => {
-        const key = `${entry.type}:${String(entry.text || '').toLowerCase().trim()}`;
-        if (!key || seen.has(key)) return;
-        seen.add(key);
-        dedupedEntries.push(entry);
     });
 
     return {
-        summary,
-        entries: dedupedEntries
+        summary: summaryLines.join(' '),
+        entries
     };
 };
 
@@ -437,69 +402,7 @@ const aggregateQuarterly = (values = []) => {
     return chunks;
 };
 
-const MetricLineChart = ({ label, values = [], xLabels = [], unit = 'count' }) => {
-    const nums = values.map(Number).filter(Number.isFinite);
-    if (nums.length < 2) return null;
-
-    const width = 360;
-    const height = 190;
-    const leftPad = 44;
-    const rightPad = 14;
-    const topPad = 14;
-    const bottomPad = 36;
-    const plotW = width - leftPad - rightPad;
-    const plotH = height - topPad - bottomPad;
-
-    const min = Math.min(...nums);
-    const max = Math.max(...nums);
-    const span = Math.max(1, max - min);
-    const yMin = min - span * 0.1;
-    const yMax = max + span * 0.1;
-
-    const xAt = (i) => leftPad + (i * plotW) / Math.max(1, nums.length - 1);
-    const yAt = (v) => topPad + ((yMax - v) * plotH) / Math.max(0.0001, yMax - yMin);
-
-    const points = nums.map((v, i) => `${xAt(i)},${yAt(v)}`).join(' ');
-    const yTicks = 4;
-    const tickValues = Array.from({ length: yTicks + 1 }, (_, i) => yMin + ((yMax - yMin) * i) / yTicks);
-
-    return (
-        <article className="line-chart-card">
-            <div className="line-chart-header">
-                <h4>{label}</h4>
-                <span>{unit.replace('_', ' ')}</span>
-            </div>
-            <svg className="line-chart-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${label} line chart`}>
-                <line x1={leftPad} y1={topPad} x2={leftPad} y2={topPad + plotH} className="axis-line" />
-                <line x1={leftPad} y1={topPad + plotH} x2={leftPad + plotW} y2={topPad + plotH} className="axis-line" />
-
-                {tickValues.map((t, idx) => {
-                    const y = yAt(t);
-                    return (
-                        <g key={idx}>
-                            <line x1={leftPad} y1={y} x2={leftPad + plotW} y2={y} className="grid-line" />
-                            <text x={leftPad - 6} y={y + 3} className="tick-label" textAnchor="end">{formatAxisTickValue(t, unit)}</text>
-                        </g>
-                    );
-                })}
-
-                <polyline points={points} className="series-line" />
-                {nums.map((v, i) => (
-                    <circle key={i} cx={xAt(i)} cy={yAt(v)} r="3" className="series-point" />
-                ))}
-
-                {nums.map((_, i) => (
-                    <text key={`x-${i}`} x={xAt(i)} y={topPad + plotH + 16} className="tick-label" textAnchor="middle">
-                        {xLabels[i] || `P${i + 1}`}
-                    </text>
-                ))}
-
-                <text x={leftPad + plotW / 2} y={height - 4} className="axis-title" textAnchor="middle">Time</text>
-                <text x={leftPad} y={10} className="axis-title" textAnchor="start">Y: {unitDisplayLabel(unit)}</text>
-            </svg>
-        </article>
-    );
-};
+// MetricLineChart removed (imported from components)
 
 const normalizeCaseDetail = (detail) => {
     if (!detail || typeof detail !== 'object') return null;
@@ -548,17 +451,30 @@ const getCaseModeMeta = (source = {}) => {
 
 const AdminEvaluation = () => {
     const [importingPdf, setImportingPdf] = useState(false);
+    const [uploadingFileName, setUploadingFileName] = useState('');
+    const [uploadProgress, setUploadProgress] = useState(0);
     const [savingCase, setSavingCase] = useState(false);
     const [saveError, setSaveError] = useState('');
     const [saveSuccess, setSaveSuccess] = useState(false);
     const [pdfDraftMeta, setPdfDraftMeta] = useState(null);
     const [pdfDraft, setPdfDraft] = useState(null);
     const [caseStudies, setCaseStudies] = useState([]);
+    const [loading, setLoading] = useState(true);
     const [caseTitle, setCaseTitle] = useState('');
     const [caseIndustry, setCaseIndustry] = useState('');
     const [thresholdPassingScore, setThresholdPassingScore] = useState(0.6);
     const [showPreviewDialog, setShowPreviewDialog] = useState(false);
     const [theme, setTheme] = useState(document.documentElement.getAttribute('data-theme') || 'light');
+    const [sidebarWidth, setSidebarWidth] = useState(() => window.innerWidth <= 1280 ? 280 : 320);
+    const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+
+    useEffect(() => {
+        const savedTheme = localStorage.getItem('theme');
+        if (savedTheme) {
+            setTheme(savedTheme);
+            document.documentElement.setAttribute('data-theme', savedTheme);
+        }
+    }, []);
 
     const toggleTheme = () => {
         const newTheme = theme === 'light' ? 'dark' : 'light';
@@ -577,13 +493,28 @@ const AdminEvaluation = () => {
     const [loadingCaseDetail, setLoadingCaseDetail] = useState(false);
 
     const fetchCaseStudies = async () => {
+        setLoading(true);
         try {
             const res = await axios.get(`${API_BASE}/admin/case-studies`);
             setCaseStudies(Array.isArray(res.data?.caseStudies) ? res.data.caseStudies : []);
         } catch {
             setCaseStudies([]);
+        } finally {
+            setLoading(false);
         }
     };
+
+    const fileInputRef = useRef(null);
+
+    useEffect(() => {
+        const handleAction = (e) => {
+            const { type } = e.detail;
+            if (type === 'create') handleCreateManualCase();
+            if (type === 'upload') fileInputRef.current?.click();
+        };
+        window.addEventListener('case-study-action', handleAction);
+        return () => window.removeEventListener('case-study-action', handleAction);
+    }, []);
 
     useEffect(() => { fetchCaseStudies(); }, []);
 
@@ -605,37 +536,64 @@ const AdminEvaluation = () => {
         }
 
         setImportingPdf(true);
+        setUploadingFileName(file.name);
+        setUploadProgress(10); // Start at 10%
         setSaveError('');
         setSaveSuccess(false);
+
+        // Progress simulation for better UX during network upload
+        const progressInterval = setInterval(() => {
+            setUploadProgress(prev => {
+                if (prev >= 90) return prev;
+                return prev + Math.random() * 10;
+            });
+        }, 800);
 
         try {
             const formData = new FormData();
             formData.append('pdf', file);
             const res = await axios.post(`${API_BASE}/case-studies/import-pdf`, formData, {
-                headers: { 'Content-Type': 'multipart/form-data' }
+                headers: { 'Content-Type': 'multipart/form-data' },
+                onUploadProgress: (progressEvent) => {
+                    const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+                    // Combine with manual progress but don't let it go backwards
+                    setUploadProgress(prev => Math.max(prev, percentCompleted));
+                }
             });
 
             if (res.data?.success && res.data?.draft) {
-                const draft = res.data.draft;
-                setPdfDraft(draft);
-                setPdfDraftMeta(res.data.meta || null);
-                setCaseTitle(String(draft.title || '').trim());
-                setCaseIndustry(String(draft.industry || '').trim());
-                setThresholdPassingScore(Number(draft.thresholdPassingScore ?? 0.6));
-                const draftSections = buildSectionsFromDraft(draft);
-                setSections(draftSections);
-                setActiveSectionId(draftSections[0]?.id || 'overview');
+                setUploadProgress(100);
+                clearInterval(progressInterval);
+                // Short delay to show 100% before switching
+                setTimeout(() => {
+                    const draft = res.data.draft;
+                    setPdfDraft(draft);
+                    setPdfDraftMeta(res.data.meta || null);
+                    setCaseTitle(String(draft.title || '').trim());
+                    setCaseIndustry(String(draft.industry || '').trim());
+                    setThresholdPassingScore(Number(draft.thresholdPassingScore ?? 0.6));
+                    const draftSections = buildSectionsFromDraft(draft);
+                    setSections(draftSections);
+                    setActiveSectionId(draftSections[0]?.id || 'overview');
 
-                const savedMode = String(draft?.parsedSections?._caseMode || 'chat_only').toLowerCase();
-                const normalizedMode = savedMode === 'mock_drill_chat' ? 'mock_drill_chat' : 'chat_only';
-                setAssessmentMode(normalizedMode);
-                const savedLevers = Array.isArray(draft?.parsedSections?._mockDrill?.levers) ? draft.parsedSections._mockDrill.levers : [];
-                setSimulationConfigText(serializeSimulationConfig(savedLevers));
+                    const savedMode = String(draft?.parsedSections?._caseMode || 'chat_only').toLowerCase();
+                    const normalizedMode = savedMode === 'mock_drill_chat' ? 'mock_drill_chat' : 'chat_only';
+                    setAssessmentMode(normalizedMode);
+                    const savedLevers = Array.isArray(draft?.parsedSections?._mockDrill?.levers) ? draft.parsedSections._mockDrill.levers : [];
+                    setSimulationConfigText(serializeSimulationConfig(savedLevers));
+
+                    setImportingPdf(false);
+                    setUploadingFileName('');
+                    setUploadProgress(0);
+                }, 500);
             }
         } catch (err) {
+            clearInterval(progressInterval);
             setSaveError(err.response?.data?.error || 'Failed to import PDF.');
-        } finally {
             setImportingPdf(false);
+            setUploadingFileName('');
+            setUploadProgress(0);
+        } finally {
             e.target.value = '';
         }
     };
@@ -692,6 +650,20 @@ const AdminEvaluation = () => {
         () => sections.find((s) => s.id === activeSectionId) || null,
         [sections, activeSectionId]
     );
+
+    const startSidebarResize = (event) => {
+        event.preventDefault();
+        const startX = event.clientX;
+        const startWidth = sidebarWidth;
+        const doDrag = (moveEvent) => setSidebarWidth(Math.max(220, Math.min(560, startWidth + moveEvent.clientX - startX)));
+        const stopDrag = () => {
+            document.removeEventListener('mousemove', doDrag);
+            document.removeEventListener('mouseup', stopDrag);
+        };
+
+        document.addEventListener('mousemove', doDrag);
+        document.addEventListener('mouseup', stopDrag);
+    };
 
     const questionList = useMemo(() => {
         // Read directly from the content of problem/questions sections that are
@@ -764,28 +736,6 @@ const AdminEvaluation = () => {
             });
     }, [pdfDraft]);
 
-    const timelineLabels = useMemo(() => {
-        const seriesLen = Math.max(...metricRows.map((row) => row.values.length), 0);
-        if (seriesLen <= 0) return [];
-        if (seriesLen <= 12) return monthNames.slice(0, seriesLen);
-        return Array.from({ length: seriesLen }, (_, i) => `P${i + 1}`);
-    }, [metricRows]);
-
-    const metricKpis = useMemo(() => metricRows.slice(0, 8).map((row) => {
-        const base = Number(row.values[0] || 0);
-        const current = Number(row.values[row.values.length - 1] || 0);
-        const deltaPct = row.values.length > 1 && base !== 0 ? ((current - base) / Math.abs(base)) * 100 : 0;
-        return {
-            key: row.key,
-            label: row.label,
-            unit: row.unit,
-            current,
-            delta: row.delta,
-            deltaPct,
-            isImproving: row.improving
-        };
-    }), [metricRows]);
-
     const showMetricsPreview = useMemo(() => {
         if (activeSectionId === METRICS_SECTION_ID) return true;
         return isMetricsSection(activeSection);
@@ -793,7 +743,7 @@ const AdminEvaluation = () => {
 
     const activeInlineSeries = useMemo(() => {
         return extractInlineSeries(activeSection?.content || '');
-    }, [activeSection]);
+    }, [activeSection?.content]); // Live updates on content change
 
     const activeInlineMetricRows = useMemo(() => {
         return (activeInlineSeries || []).map((series, idx) => {
@@ -805,7 +755,7 @@ const AdminEvaluation = () => {
             return {
                 key,
                 label: String(series?.groupLabel || `Series ${idx + 1}`),
-                unit: inferMetricUnit(key, values),
+                unit: series.unit === 'cr' ? 'inr_cr' : series.unit === 'lakh' ? 'inr_lakh' : series.unit === 'percent' ? 'percent' : 'count',
                 values,
                 quarterly: aggregateQuarterly(values),
                 delta,
@@ -815,12 +765,13 @@ const AdminEvaluation = () => {
     }, [activeInlineSeries]);
 
     const scopedMetricRows = useMemo(() => {
-        // Return metrics that belong to the active section (or all metrics if no active section)
         if (!activeSection) return metricRows;
+        // Prioritize inline series found in the current active section's content
+        const inlineRows = activeInlineMetricRows;
+        if (inlineRows.length > 0) return inlineRows;
+
         const scoped = metricRows.filter((row) => metricBelongsToSection(row, activeSection));
-        // Fallback for sections where numeric data exists only as inline series in content.
-        if (scoped.length > 0) return scoped;
-        return activeInlineMetricRows;
+        return scoped.length > 0 ? scoped : metricRows;
     }, [activeSection, metricRows, activeInlineMetricRows]);
 
     const scopedMetricKeys = useMemo(() => new Set(scopedMetricRows.map((r) => r.key)), [scopedMetricRows]);
@@ -832,9 +783,12 @@ const AdminEvaluation = () => {
     }, [scopedMetricRows, activeSectionId, metricsEditorSectionId]);
 
     const editedMetricRows = useMemo(() => {
+        // If we have live inline series, prioritize them over the metrics editor text
+        // This ensures real-time updates as the user types in the Raw Content textarea.
+        if (activeInlineMetricRows.length > 0) return activeInlineMetricRows;
         const parsed = parseMetricsEditorText(metricsEditorText);
         return parsed.length > 0 ? parsed : scopedMetricRows;
-    }, [metricsEditorText, scopedMetricRows]);
+    }, [metricsEditorText, scopedMetricRows, activeInlineMetricRows]);
 
     const editedMetricKpis = useMemo(() => editedMetricRows.slice(0, 8).map((row) => {
         const base = Number(row.values[0] || 0);
@@ -983,8 +937,8 @@ const AdminEvaluation = () => {
                     throw new Error('Invalid case study detail response.');
                 }
                 const llmSectionCount = Array.isArray(draft.parsedSections?._sections)
-                        ? draft.parsedSections._sections.length
-                        : Object.keys(draft.parsedSections).filter((k) => !String(k).startsWith('_')).length;
+                    ? draft.parsedSections._sections.length
+                    : Object.keys(draft.parsedSections).filter((k) => !String(k).startsWith('_')).length;
                 setPdfDraftMeta({
                     fileName: 'Editing Existing Case Study',
                     pages: '?',
@@ -1068,12 +1022,12 @@ const AdminEvaluation = () => {
             );
 
             const overviewSection = pickByRole('context', 'context', /overview|context|background/);
-            const problemSection  = pickByRole('problem',  'problem',  /problem|question|challenge|objective/);
-            const openingSection  = pickByRole('prompt',   'prompt',   /opening|prompt|start|intro/);
+            const problemSection = pickByRole('problem', 'problem', /problem|question|challenge|objective/);
+            const openingSection = pickByRole('prompt', 'prompt', /opening|prompt|start|intro/);
 
             const overviewText = String(overviewSection?.content || '').trim();
-            const problemText  = String(problemSection?.content  || '').trim();
-            const openingText  = String(openingSection?.content  || '').trim();
+            const problemText = String(problemSection?.content || '').trim();
+            const openingText = String(openingSection?.content || '').trim();
 
             // Build cleansed _sections array from the current editor state
             // (preserves any edits the admin made to headings/content)
@@ -1161,24 +1115,24 @@ const AdminEvaluation = () => {
         }
     };
 
+    if (loading) {
+        return (
+            <div className="admin-eval-page">
+                <PageLoader
+                    message="Syncing Case Repository"
+                    subMessage="Loading the latest case study data from the cloud."
+                />
+            </div>
+        );
+    }
+
     if (pdfDraft) {
         return (
-            <div className="assessment-portal metric-priority-layout admin-preview-layout" style={{ '--left-width': '300px', '--right-width': '0px', gridTemplateColumns: 'var(--left-width) 4px minmax(0, 1fr)' }}>
+            <div className="assessment-portal metric-priority-layout admin-preview-layout" style={{ '--left-width': '320px', '--right-width': '0px', gridTemplateColumns: 'var(--left-width) 4px minmax(0, 1fr)' }}>
                 <aside className="assessment-sidebar assessment-sidebar--sections">
-                    <div className="sidebar-case-header">
-                        <div className="case-header-top">
-                            <span className="case-tag-pill">CASE PREVIEW</span>
-                            <span className="case-chip">ADMIN MODE</span>
-                        </div>
-                        <h2 className="case-title">Draft Outline</h2>
-                        <p className="case-industry">Review and finalize content</p>
-                    </div>
 
-                    <div className="sidebar-card">
-                        <div className="sidebar-card__header">
-                            <h3 className="sidebar-card__title">Section Navigator</h3>
-                        </div>
-                        <div className="sidebar-card__body sidebar-section-nav">
+                    <SidebarCard label="Section Navigator">
+                        <div className="sidebar-section-nav">
                             {sections.map((s) => (
                                 <button
                                     key={s.id}
@@ -1194,112 +1148,119 @@ const AdminEvaluation = () => {
                             ))}
                             <button type="button" className="sidebar-section-btn sidebar-section-btn--add" onClick={addSection}>+ Add Section</button>
                         </div>
-                    </div>
+                    </SidebarCard>
 
-                    <div className="sidebar-card">
-                        <div className="sidebar-card__header">
-                            <h3 className="sidebar-card__title">Detected Questions</h3>
+                    <SidebarCard label="Question Tracker" variant="accent">
+                        <div className="question-tracker-summary">
+                            <p>Detected {questionList.length} Questions</p>
                         </div>
-                        <div className="sidebar-card__body" style={{ padding: '10px 12px' }}>
+                        <div className="question-tracker-list">
                             {questionList.length > 0 ? (
-                                <ol style={{ margin: 0, paddingLeft: '18px' }}>
-                                    {questionList.map((q, idx) => (
-                                        <li
-                                            key={idx}
-                                            style={{ fontSize: '0.72rem', marginBottom: '10px', color: 'var(--text-secondary)', lineHeight: '1.5' }}
-                                        >
-                                            {/* Strip leading ordinal prefix (e.g. "1. " "1) " "1: ") so <ol> is the only number */}
-                                            {String(q).replace(/^\d+[.):\s]+\s*/, '').trim()}
-                                        </li>
-                                    ))}
-                                </ol>
+                                questionList.map((q, idx) => (
+                                    <div 
+                                        key={idx} 
+                                        className="question-chip question-chip--not_attempted"
+                                        title={q}
+                                    >
+                                        <span className="question-chip__index">Q{idx + 1}</span>
+                                        <span className="question-chip__text">{String(q).replace(/^\d+[.):\s]+\s*/, '').trim()}</span>
+                                    </div>
+                                ))
                             ) : (
-                                <div style={{
-                                    fontSize: '0.72rem',
-                                    color: 'var(--accent-warning, #f5a623)',
-                                    lineHeight: '1.5',
-                                    display: 'flex',
-                                    alignItems: 'flex-start',
-                                    gap: '6px'
-                                }}>
+                                <div style={{ fontSize: '0.75rem', color: 'var(--accent-warning)', lineHeight: '1.6', display: 'flex', gap: '8px', padding: '12px' }}>
                                     <span>⚠️</span>
-                                    <span>No explicit questions detected. Check that the PDF has a clear Problem Statement or numbered questions section.</span>
+                                    <span>No explicit questions detected.</span>
                                 </div>
                             )}
                         </div>
-                    </div>
+                        <div className="question-legend">
+                            <span><i className="dot dot--grey" />Not attempted</span>
+                            <span><i className="dot dot--green" />Attempted and passed</span>
+                            <span><i className="dot dot--red" />Attempted and failed</span>
+                            <span><i className="dot dot--yellow" />Flagged for later</span>
+                        </div>
+                    </SidebarCard>
                 </aside>
 
                 <div className="resize-handle" title="Preview sidebar" />
 
-                <main className="metrics-workspace">
-                    <header className="workspace-header" style={{ alignItems: 'flex-start' }}>
-                        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                            <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-                                <input
-                                    className="workspace-title admin-input"
-                                    value={caseTitle}
-                                    onChange={(e) => setCaseTitle(e.target.value)}
-                                    placeholder="Case Title"
-                                    style={{ margin: 0, padding: '4px 8px', width: '100%', minWidth: 0, background: 'transparent' }}
-                                />
-                                <div className="score-chip" style={{ margin: 0, padding: '4px 8px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                    <div className="score-chip__label" style={{ marginBottom: 0 }}>THRESHOLD</div>
-                                    <input
-                                        type="number"
-                                        min="0"
-                                        max="1"
-                                        step="0.05"
-                                        value={thresholdPassingScore}
-                                        onChange={(e) => setThresholdPassingScore(e.target.value)}
-                                        style={{ background: 'transparent', border: 'none', color: 'var(--text-primary)', width: '40px', fontWeight: 900, outline: 'none' }}
-                                    />
-                                </div>
-                            </div>
+                <main className="metrics-workspace" style={{ padding: '8px 12px' }}>
+                    <header className="workspace-header" style={{ marginBottom: '8px' }}>
+                        <div style={{ flex: 1 }}>
                             <input
-                                className="workspace-subtitle admin-input"
+                                className="admin-title-input"
+                                value={caseTitle}
+                                onChange={(e) => setCaseTitle(e.target.value)}
+                                placeholder="Enter Case Title..."
+                            />
+                            <input
+                                className="admin-industry-input"
                                 value={caseIndustry}
                                 onChange={(e) => setCaseIndustry(e.target.value)}
-                                placeholder="Industry"
-                                style={{ margin: 0, padding: '4px 8px', width: '100%', minWidth: 0, background: 'transparent' }}
+                                placeholder="Industry (e.g. Finance, E-commerce)"
                             />
-                            <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
-                                <button
-                                    type="button"
-                                    className={`metric-tab ${assessmentMode === 'chat_only' ? 'active' : ''}`}
-                                    onClick={() => setAssessmentMode('chat_only')}
-                                >
-                                    Standard Chat
-                                </button>
-                                <button
-                                    type="button"
-                                    className={`metric-tab ${assessmentMode === 'mock_drill_chat' ? 'active' : ''}`}
-                                    onClick={() => setAssessmentMode('mock_drill_chat')}
-                                >
-                                    Mock Drill + Chat
-                                </button>
+                        </div>
+
+                        <div className="admin-threshold-box">
+                            <span className="threshold-label">Passing Score</span>
+                            <div className="threshold-input-wrap">
+                                <input
+                                    type="number"
+                                    className="admin-threshold-input"
+                                    min="0" max="1" step="0.05"
+                                    value={thresholdPassingScore}
+                                    onChange={(e) => setThresholdPassingScore(e.target.value)}
+                                />
                             </div>
                         </div>
-                        <div className="workspace-actions">
-                            <button className="theme-toggle" onClick={toggleTheme}>
-                                {theme === 'light' ? 'DARK' : 'LIGHT'}
-                            </button>
-                            <button className="admin-btn secondary" onClick={() => { setPdfDraft(null); setPdfDraftMeta(null); setEditingCaseId(null); }}>
+
+                        <button
+                            className="theme-toggle-pill"
+                            onClick={toggleTheme}
+                            title={theme === 'light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}
+                            style={{ marginRight: '12px' }}
+                        >
+                            {theme === 'light' ? (
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+                            ) : (
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+                            )}
+                        </button>
+
+                        <div className="preview-actions">
+                            <button className="pill-btn secondary" onClick={() => { setPdfDraft(null); setPdfDraftMeta(null); setEditingCaseId(null); }}>
                                 Cancel
                             </button>
-                            <button className="btn-exit" onClick={() => setShowPreviewDialog(true)} disabled={savingCase} style={{ background: 'var(--accent-primary)', color: '#fff', border: 'none' }}>
-                                {savingCase ? (editingCaseId ? 'Updating...' : 'Creating...') : (editingCaseId ? 'Update case study' : 'Create case study')}
+                            <button className="pill-btn primary" onClick={() => setShowPreviewDialog(true)} disabled={savingCase}>
+                                {savingCase ? (editingCaseId ? 'Updating...' : 'Creating...') : (editingCaseId ? 'Update Case Study' : 'Create Case Study')}
                             </button>
                         </div>
                     </header>
 
+                    <div style={{ display: 'flex', gap: '8px', marginBottom: '8px', paddingLeft: '4px' }}>
+                        <button
+                            type="button"
+                            className={`metric-tab ${assessmentMode === 'chat_only' ? 'active' : ''}`}
+                            onClick={() => setAssessmentMode('chat_only')}
+                        >
+                            Standard Chat
+                        </button>
+                        <button
+                            type="button"
+                            className={`metric-tab ${assessmentMode === 'mock_drill_chat' ? 'active' : ''}`}
+                            onClick={() => setAssessmentMode('mock_drill_chat')}
+                        >
+                            Mock Drill + Chat
+                        </button>
+                    </div>
+
                     {/* ── Section text editor — always shown for any selected section ── */}
                     {activeSection && (
-                        <section className="case-content-pane" style={{ marginTop: '20px' }}>
+                        <section className="case-content-pane" style={{ marginTop: '4px' }}>
                             <article className="main-section-card">
                                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '12px', alignItems: 'center' }}>
                                     <input
-                                        style={{ fontSize: '1.15rem', fontWeight: 900, textTransform: 'uppercase', background: 'transparent', border: '1px dashed var(--border-default)', color: 'var(--text-primary)', padding: '4px 8px', width: '100%' }}
+                                        style={{ fontSize: '1.25rem', fontWeight: 900, textTransform: 'uppercase', background: 'transparent', border: '1px dashed var(--border-default)', color: 'var(--text-primary)', padding: '6px 10px', width: '100%', letterSpacing: '0.02em' }}
                                         value={activeSection.heading}
                                         onChange={(e) => updateActiveSection({ heading: e.target.value })}
                                         placeholder="Section heading"
@@ -1309,42 +1270,136 @@ const AdminEvaluation = () => {
                                     </button>
                                 </div>
 
-                                {/* Auto-growing textarea — fills page, no internal scroll */}
-                                <textarea
-                                    style={{
-                                        width: '100%',
-                                        minHeight: '200px',
-                                        height: 'auto',
-                                        fontSize: '0.85rem',
-                                        lineHeight: '1.6',
-                                        background: 'var(--bg-subtle)',
-                                        border: '1px dashed var(--border-default)',
-                                        color: 'var(--text-primary)',
-                                        padding: '16px',
-                                        resize: 'none',
-                                        overflow: 'hidden',
-                                        boxSizing: 'border-box',
-                                    }}
-                                    value={activeSection.content}
-                                    onChange={(e) => {
-                                        // Auto-grow: reset then set to scrollHeight so no internal scroll
-                                        e.target.style.height = 'auto';
-                                        e.target.style.height = e.target.scrollHeight + 'px';
-                                        updateActiveSection({ content: e.target.value });
-                                    }}
-                                    onFocus={(e) => {
-                                        e.target.style.height = 'auto';
-                                        e.target.style.height = e.target.scrollHeight + 'px';
-                                    }}
-                                    ref={(el) => {
-                                        // Set height on mount/section-change
-                                        if (el) {
-                                            el.style.height = 'auto';
-                                            el.style.height = el.scrollHeight + 'px';
-                                        }
-                                    }}
-                                    placeholder="Section content"
-                                />
+                                {/* Dual-pane editor and live preview */}
+                                <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1.2fr)', gap: '20px', alignItems: 'start' }}>
+                                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                        <div style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '8px', letterSpacing: '0.05em', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                            <span>Raw Content</span>
+                                            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                                <button
+                                                    className="admin-btn secondary"
+                                                    style={{ padding: '2px 8px', fontSize: '0.65rem', height: '20px' }}
+                                                    onClick={() => {
+                                                        const beautifyContent = (text) => {
+                                                            if (!text) return '';
+                                                            const lines = text.split('\n');
+                                                            const result = [];
+                                                            for (let i = 0; i < lines.length; i++) {
+                                                                const line = lines[i].trimEnd();
+                                                                if (!line.trim()) {
+                                                                    if (result.length > 0 && result[result.length - 1] !== '') result.push('');
+                                                                    continue;
+                                                                }
+                                                                const isHeading = /:\s*$/.test(line) && line.length < 80 && !/^[-*•]/.test(line);
+                                                                if (isHeading && i > 0 && result.length > 0 && result[result.length - 1] !== '') {
+                                                                    result.push('');
+                                                                }
+                                                                result.push(line);
+                                                            }
+                                                            return result.join('\n');
+                                                        };
+                                                        updateActiveSection({ content: beautifyContent(activeSection.content) });
+                                                    }}
+                                                >
+                                                    Auto-Format Spacing
+                                                </button>
+                                                <span style={{ color: 'var(--accent-primary)', opacity: 0.8 }}>Editable</span>
+                                            </div>
+                                        </div>
+                                        <textarea
+                                            className="section-editor-textarea"
+                                            value={String(activeSection.content || '').replace(/●/g, '•')}
+                                            onChange={(e) => {
+                                                e.target.style.height = 'auto';
+                                                e.target.style.height = Math.max(200, e.target.scrollHeight) + 'px';
+                                                updateActiveSection({ content: e.target.value.replace(/●/g, '•') });
+                                            }}
+                                            onBlur={(e) => {
+                                                const text = e.target.value;
+                                                const lines = text.split('\n');
+                                                const result = [];
+                                                let changed = false;
+                                                for (let i = 0; i < lines.length; i++) {
+                                                    const line = lines[i].trimEnd();
+                                                    if (!line.trim()) {
+                                                        if (result.length > 0 && result[result.length - 1] !== '') result.push('');
+                                                        else changed = true;
+                                                        continue;
+                                                    }
+                                                    const isHeading = /:\s*$/.test(line) && line.length < 80 && !/^[-*•]/.test(line);
+                                                    if (isHeading && i > 0 && result.length > 0 && result[result.length - 1] !== '') {
+                                                        result.push('');
+                                                        changed = true;
+                                                    }
+                                                    result.push(line);
+                                                }
+                                                if (changed) updateActiveSection({ content: result.join('\n') });
+                                            }}
+                                            onFocus={(e) => {
+                                                e.target.style.height = 'auto';
+                                                e.target.style.height = Math.max(200, e.target.scrollHeight) + 'px';
+                                            }}
+                                            ref={(el) => {
+                                                if (el) {
+                                                    el.style.height = 'auto';
+                                                    el.style.height = Math.max(200, el.scrollHeight) + 'px';
+                                                }
+                                            }}
+                                            placeholder="Section content..."
+                                            style={{ minHeight: '200px', backgroundColor: 'var(--surface-sunken)', border: '1px solid var(--border-default)', padding: '16px', borderRadius: '8px', overflow: 'hidden', lineHeight: '1.6', fontSize: '1.05rem', fontWeight: 500 }}
+                                        />
+                                    </div>
+
+                                    <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                        <div style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', textTransform: 'uppercase', marginBottom: '8px', letterSpacing: '0.05em', display: 'flex', justifyContent: 'space-between' }}>
+                                            <span>Live Preview</span>
+                                            <span style={{ color: 'var(--accent-success)', opacity: 0.8 }}>Candidate View</span>
+                                        </div>
+                                        <div className="drawer-content-card" style={{ margin: 0, height: '100%' }}>
+                                            <div className="drawer-content-title" style={{ padding: '12px 16px', marginBottom: 0 }}>
+                                                <span className="title-icon">
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line><polyline points="10 9 9 9 8 9"></polyline></svg>
+                                                </span>
+                                                <span>{activeSection.heading || 'Untitled Section'}</span>
+                                            </div>
+                                            {(() => {
+                                                const { summary, entries } = splitSectionContent(activeSection.content);
+                                                const headingColors = ['#8957e5', '#238636', '#d29922', '#bf3989', '#1f6feb'];
+                                                let headingCount = 0;
+                                                return (
+                                                    <div className="drawer-card-body" style={{ padding: '16px', paddingTop: '12px' }}>
+                                                        {summary && <div className="drawer-card-summary">{summary}</div>}
+                                                        {entries.length > 0 && (
+                                                            <div className="drawer-bullet-list" style={{ gap: '6px' }}>
+                                                                {entries.map((entry, index) => {
+                                                                    if (entry.type === 'heading') {
+                                                                        const color = headingColors[headingCount % headingColors.length];
+                                                                        headingCount++;
+                                                                        return (
+                                                                            <div key={index} className="drawer-inline-heading" style={{ marginTop: index === 0 && !summary ? '0' : '32px', marginBottom: '4px', borderLeftColor: color }}>{entry.text}</div>
+                                                                        );
+                                                                    } else if (entry.type === 'bullet') {
+                                                                        return (
+                                                                            <div key={index} className="drawer-bullet-row">
+                                                                                {!/^\d+[.)]/.test(entry.text) && <span className="bullet-dot"></span>}
+                                                                                <span className="bullet-text" style={{ marginLeft: /^\d+[.)]/.test(entry.text) ? '0' : 'inherit' }}>{entry.text}</span>
+                                                                            </div>
+                                                                        );
+                                                                    } else {
+                                                                        return (
+                                                                            <div key={index} style={{ marginBottom: '4px', fontSize: '0.9rem', color: 'var(--text-primary)', lineHeight: '1.6' }}>{entry.text}</div>
+                                                                        );
+                                                                    }
+                                                                })}
+                                                            </div>
+                                                        )}
+                                                        {!summary && entries.length === 0 && <div className="drawer-card-summary" style={{ opacity: 0.5, fontStyle: 'italic' }}>No content available.</div>}
+                                                    </div>
+                                                );
+                                            })()}
+                                        </div>
+                                    </div>
+                                </div>
                             </article>
 
                             {/* ── Inline charts from section content — no backend dependency ── */}
@@ -1354,26 +1409,40 @@ const AdminEvaluation = () => {
                                 return (
                                     <>
                                         <div style={{
-                                            marginTop: '16px',
-                                            padding: '12px 0 4px',
-                                            fontSize: '0.72rem',
-                                            fontWeight: 700,
-                                            letterSpacing: '0.08em',
+                                            marginTop: '24px',
+                                            padding: '12px 0 8px',
+                                            fontSize: '0.75rem',
+                                            fontWeight: 800,
+                                            letterSpacing: '0.1em',
                                             color: 'var(--text-secondary)',
                                             textTransform: 'uppercase',
+                                            borderTop: '1px solid var(--border-light)',
+                                            display: 'flex',
+                                            justifyContent: 'space-between',
+                                            alignItems: 'center'
                                         }}>
-                                            Data Visualisation — edit the numbers above and charts update instantly
+                                            <span>Dynamic Data Intelligence</span>
+                                            <span style={{ fontSize: '0.6rem', opacity: 0.6 }}>Updated Real-Time</span>
                                         </div>
-                                        <section className="trend-strip" style={{ marginTop: '8px', flexWrap: 'wrap', gap: '12px' }}>
-                                            {inlineSeries.map((series, si) => (
-                                                <MetricLineChart
-                                                    key={`${activeSection.id}-series-${si}`}
-                                                    label={series.groupLabel}
-                                                    values={series.points.map((p) => p.value)}
-                                                    xLabels={series.points.map((p) => p.label)}
-                                                    unit="count"
-                                                />
-                                            ))}
+                                        <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '16px', marginTop: '4px' }}>
+                                            {inlineSeries.map((series, si) => {
+                                                const headingColors = ['#8957e5', '#238636', '#d29922', '#bf3989', '#1f6feb'];
+                                                const color = headingColors[si % headingColors.length];
+                                                const hasNegatives = series.points.some(p => p.value < 0);
+                                                const chartType = hasNegatives ? 'line' : (si % 2 === 0 ? 'line' : 'bar');
+
+                                                return (
+                                                    <MetricChart
+                                                        key={`${activeSection.id}-series-${si}`}
+                                                        label={series.groupLabel}
+                                                        values={series.points.map((p) => p.value)}
+                                                        xLabels={series.points.map((p) => p.label)}
+                                                        unit={series.unit || 'count'}
+                                                        type={chartType}
+                                                        color={color}
+                                                    />
+                                                );
+                                            })}
                                         </section>
                                     </>
                                 );
@@ -1392,13 +1461,12 @@ const AdminEvaluation = () => {
 
                                     <section className="kpi-rail" aria-label="Admin metrics KPI preview">
                                         {editedMetricKpis.map((metric) => (
-                                            <article key={metric.key} className={`kpi-tile ${metric.isImproving ? 'up' : 'down'}`}>
-                                                <p className="kpi-tile__name">{metric.label}</p>
-                                                <p className="kpi-tile__unit">{unitDisplayLabel(metric.unit)}</p>
-                                                <p className="kpi-tile__value">{formatMetricValue(metric.current, metric.unit)}</p>
-                                                <p className={`kpi-tile__delta ${metric.delta >= 0 ? 'positive' : 'negative'}`}>
-                                                    {metric.delta >= 0 ? '+' : '-'}{formatMetricValue(Math.abs(metric.delta), metric.unit)} ({metric.deltaPct >= 0 ? '+' : ''}{metric.deltaPct.toFixed(1)}%)
-                                                </p>
+                                            <article key={metric.key} className="kpi-tile" style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                <span className="kpi-tile__name">{metric.label}</span>
+                                                <div className="kpi-tile__value">{formatMetricValue(metric.current, metric.unit)}</div>
+                                                <div className={`kpi-tile__delta ${metric.deltaPct >= 0 ? 'pos' : 'neg'}`}>
+                                                    {metric.deltaPct >= 0 ? '▲' : '▼'} {Math.abs(metric.deltaPct).toFixed(1)}%
+                                                </div>
                                             </article>
                                         ))}
                                     </section>
@@ -1483,16 +1551,24 @@ const AdminEvaluation = () => {
                                         </div>
                                     </section>
 
-                                    <section className="trend-strip" style={{ marginTop: '10px' }}>
-                                        {editedMetricRows.slice(0, 6).map((row) => (
-                                            <MetricLineChart
-                                                key={`admin-chart-${row.key}`}
-                                                label={row.label}
-                                                values={row.values}
-                                                xLabels={editedTimelineLabels}
-                                                unit={row.unit}
-                                            />
-                                        ))}
+                                    <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(340px, 1fr))', gap: '16px', marginTop: '16px' }}>
+                                        {editedMetricRows.slice(0, 6).map((row, si) => {
+                                            const headingColors = ['#8957e5', '#238636', '#d29922', '#bf3989', '#1f6feb'];
+                                            const color = headingColors[si % headingColors.length];
+                                            const hasNegatives = row.values.some(v => v < 0);
+                                            const chartType = hasNegatives ? 'line' : (si % 2 === 0 ? 'line' : 'bar');
+                                            return (
+                                                <MetricChart
+                                                    key={`admin-chart-${row.key}`}
+                                                    label={row.label}
+                                                    values={row.values}
+                                                    xLabels={editedTimelineLabels}
+                                                    unit={row.unit}
+                                                    type={chartType}
+                                                    color={color}
+                                                />
+                                            );
+                                        })}
                                     </section>
                                 </>
                             )}
@@ -1574,68 +1650,75 @@ const AdminEvaluation = () => {
     return (
         <div className="admin-eval-page">
             <div className="admin-eval-layout">
-                <div className="admin-card import-zone">
-                    <div className="import-zone-head">
-                        <span className="import-zone-title-icon" aria-hidden="true">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                                <polyline points="14 2 14 8 20 8" />
-                                <line x1="12" y1="18" x2="12" y2="12" />
-                                <polyline points="9 15 12 12 15 15" />
-                            </svg>
-                        </span>
-                        <div className="import-zone-title-block">
-                            <div className="admin-card-title">Upload Case Study PDF</div>
-                            <p className="import-zone-desc">Upload a PDF. It opens directly in a no-chat case-attempt style preview for admin review and creation.</p>
-                        </div>
-                        <div className="import-zone-symbols">
-                            <span className="import-zone-symbol">AI Parse</span>
-                            <span className="import-zone-symbol">Section Detect</span>
-                            <span className="import-zone-symbol">Metrics Ready</span>
-                        </div>
-                    </div>
-                    <div className="import-row">
-                        <label className={`file-drop-label ${importingPdf ? 'loading' : ''}`}>
+                <div className="admin-eval-hero">
+                    <div className="admin-card import-zone centered">
+                        <label className={`file-drop-label-centered ${importingPdf ? 'loading' : ''}`}>
                             <input
+                                ref={fileInputRef}
                                 type="file"
                                 accept="application/pdf"
                                 onChange={handleImportPdf}
                                 className="hidden-file-input"
                                 disabled={importingPdf}
                             />
-                            <span className="file-drop-icon">[PDF]</span>
-                            <span className="file-drop-text">{importingPdf ? 'Parsing PDF...' : 'Click to upload PDF'}</span>
+                            {importingPdf ? (
+                                <div className="import-progress-container">
+                                    <div className="importing-filename">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                            <polyline points="14 2 14 8 20 8" />
+                                        </svg>
+                                        {uploadingFileName}
+                                    </div>
+                                    <div className="import-progress-bar-bg">
+                                        <div
+                                            className="import-progress-bar-fill"
+                                            style={{ width: `${uploadProgress}%` }}
+                                        />
+                                    </div>
+                                    <div className="import-status-text">
+                                        {uploadProgress < 100 ? 'Case study is being created...' : 'Analysis complete!'}
+                                    </div>
+                                </div>
+                            ) : (
+                                <>
+                                    <div className="import-icon-box">
+                                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                            <polyline points="14 2 14 8 20 8" />
+                                            <path d="M12 18v-6" />
+                                            <path d="M9 15l3-3 3 3" />
+                                        </svg>
+                                    </div>
+                                    <div className="import-text-block">
+                                        <h2 className="import-title">Upload Case Study PDF</h2>
+                                        <p className="import-subtitle">Drag and drop your document here or click to browse</p>
+                                    </div>
+                                </>
+                            )}
                         </label>
-                        {pdfDraftMeta && (
-                            <div className="import-meta-strip">
-                                <span className="meta-chip">{pdfDraftMeta.fileName}</span>
-                                <span className="meta-chip">{pdfDraftMeta.pages || '?'} pages</span>
-                                <span className="meta-chip">{pdfDraftMeta.sectionsDiscovered || 0} sections</span>
-                                <span className="meta-chip">{pdfDraftMeta.numericSeriesFound || 0} data series</span>
-                                {pdfDraftMeta.llmExtracted !== undefined && (
-                                    <span className={`meta-chip ${pdfDraftMeta.llmExtracted ? 'success' : 'warning'}`} style={{
-                                        borderColor: pdfDraftMeta.llmExtracted ? '#3fb950' : '#f5a623',
-                                        color: pdfDraftMeta.llmExtracted ? '#3fb950' : '#f5a623'
-                                    }}>
-                                        {pdfDraftMeta.llmExtracted ? 'LLM Parsed' : 'Heuristic Fallback'}
-                                    </span>
-                                )}
-                            </div>
-                        )}
-
-                        <div className="admin-actions" style={{ justifyContent: 'flex-start', paddingTop: 0 }}>
-                            <button type="button" className="admin-btn secondary" onClick={handleCreateManualCase}>
-                                Create case study manually
-                            </button>
-                        </div>
                     </div>
                 </div>
 
                 {saveSuccess && <div className="save-banner save-banner--success">Case study created successfully.</div>}
                 {saveError && <div className="save-banner save-banner--error">{saveError}</div>}
 
-                <div className="admin-card">
-                    <div className="admin-card-title">Created Case Studies ({caseStudies.length})</div>
+                <div className="cases-list-header">
+                    <h2 className="cases-list-title">Created Case Studies</h2>
+                    <div className="cases-list-actions">
+                        <button className="list-sort-btn">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                                <line x1="21" y1="10" x2="7" y2="10" />
+                                <line x1="21" y1="6" x2="3" y2="6" />
+                                <line x1="21" y1="14" x2="11" y2="14" />
+                                <line x1="21" y1="18" x2="15" y2="18" />
+                            </svg>
+                            Sort by Date
+                        </button>
+                    </div>
+                </div>
+
+                <div className="cases-list-container">
                     {caseStudies.length === 0 ? (
                         <p className="admin-hint">No case studies created yet.</p>
                     ) : (
@@ -1643,23 +1726,36 @@ const AdminEvaluation = () => {
                             {caseStudies.map((row) => (
                                 <div key={row.id} className="case-list-row clickable" onClick={() => handleOpenCaseDetail(row.id)}>
                                     <div className="case-list-leading">
-                                        <span className="case-list-icon" aria-hidden="true">
-                                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                                <path d="M8 2h8" />
-                                                <path d="M9 2v4" />
-                                                <path d="M15 2v4" />
-                                                <rect x="4" y="6" width="16" height="16" rx="2" />
-                                                <path d="M8 11h8" />
-                                                <path d="M8 15h5" />
-                                            </svg>
-                                        </span>
+                                        <div className="case-icon-box">
+                                            {row.industry?.toLowerCase().includes('data') || row.title?.toLowerCase().includes('data') ? (
+                                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                    <line x1="18" y1="20" x2="18" y2="10" />
+                                                    <line x1="12" y1="20" x2="12" y2="4" />
+                                                    <line x1="6" y1="20" x2="6" y2="14" />
+                                                </svg>
+                                            ) : (
+                                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                                    <rect x="2" y="7" width="20" height="14" rx="2" ry="2" />
+                                                    <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16" />
+                                                </svg>
+                                            )}
+                                        </div>
                                         <div className="case-list-main">
-                                            <div className="case-list-title">{row.title}</div>
-                                            <div className="case-list-meta">
-                                                {row.industry && <span className="case-chip">{row.industry}</span>}
-                                                <span className="case-chip case-mode-chip">{getCaseModeMeta(row).label}</span>
-                                                <span className={`case-chip status-chip ${row.is_active ? 'active' : 'inactive'}`}>
-                                                    {row.is_active ? 'ACTIVE' : 'INACTIVE'}
+                                            <div className="case-title-row">
+                                                <div className="case-list-title">{row.title.toUpperCase()}</div>
+                                                <span className={`case-status-badge ${row.is_active ? 'active' : 'draft'}`}>
+                                                    {row.is_active ? 'ACTIVE' : 'DRAFT'}
+                                                </span>
+                                            </div>
+                                            <div className="case-list-meta-new">
+                                                <span className="meta-tag">{row.industry?.toUpperCase() || 'GENERAL'}</span>
+                                                <span className="meta-tag">{getCaseModeMeta(row).label.toUpperCase()}</span>
+                                                <span className="meta-time">
+                                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: '4px' }}>
+                                                        <circle cx="12" cy="12" r="10" />
+                                                        <polyline points="12 6 12 12 16 14" />
+                                                    </svg>
+                                                    Updated {new Date(row.updated_at || row.created_at).toLocaleDateString() === new Date().toLocaleDateString() ? 'today' : 'recently'}
                                                 </span>
                                             </div>
                                         </div>
@@ -1687,78 +1783,13 @@ const AdminEvaluation = () => {
                     )}
                 </div>
 
-                {loadingCaseDetail && (
-                    <PageLoader
-                        message="Loading Case Details..."
-                        subMessage="Fetching the selected case study and preparing the detail drawer."
-                    />
-                )}
 
-                {selectedCaseDetail && (
-                    <>
-                        <div className="case-drawer-backdrop" onClick={() => setSelectedCaseDetail(null)} />
-                        <aside className="case-drawer" role="dialog" aria-label="Case study detail drawer">
-                            <div className="case-drawer-head">
-                                <div>
-                                    <div className="case-list-title">{selectedCaseDetail.title}</div>
-                                    <div className="case-list-meta" style={{ marginTop: '6px' }}>
-                                        {selectedCaseDetail.industry && <span className="case-chip">{selectedCaseDetail.industry}</span>}
-                                        <span className="case-chip case-mode-chip">{getCaseModeMeta(selectedCaseDetail).label}</span>
-                                        <span className="case-chip">PASS {Math.round((Number(selectedCaseDetail.thresholdPassingScore || 0.6) || 0.6) * 100)}%</span>
-                                    </div>
-                                </div>
-                                <button className="icon-action-btn" onClick={() => setSelectedCaseDetail(null)} title="Close">✕</button>
-                            </div>
 
-                            <div className="drawer-actions">
-                                <button className="admin-btn secondary" onClick={() => { setSelectedCaseDetail(null); handleEditCase(selectedCaseDetail.id); }}>
-                                    Edit Case Study
-                                </button>
-                            </div>
-
-                            <div className="drawer-summary">
-                                {drawerSections.map((s) => (
-                                    <section className="drawer-section-card" key={`drawer-${s.id}`}>
-                                        <div className="drawer-section-title">{s.heading}</div>
-                                        {(() => {
-                                            const { summary, entries } = splitSectionContent(s.content);
-                                            return (
-                                                <>
-                                                    <div className="drawer-section-summary">{summary || 'No details available.'}</div>
-                                                    {entries.length > 0 && (
-                                                        <div className="drawer-entry-list">
-                                                            {entries.map((entry, index) => (
-                                                                entry.type === 'heading' ? (
-                                                                    <div key={`drawer-${s.id}-h-${index}`} className="drawer-inline-heading">{entry.text}</div>
-                                                                ) : (
-                                                                    <div key={`drawer-${s.id}-b-${index}`} className="drawer-bullet-item">{/question/i.test(String(s.heading || '')) ? `${entries.slice(0, index + 1).filter((e) => e.type === 'bullet').length}. ${entry.text}` : entry.text}</div>
-                                                                )
-                                                            ))}
-                                                        </div>
-                                                    )}
-                                                </>
-                                            );
-                                        })()}
-                                    </section>
-                                ))}
-                            </div>
-
-                            {drawerMetricRows.length > 0 && (
-                                <section className="trend-strip" style={{ marginTop: '12px' }}>
-                                    {drawerMetricRows.slice(0, 6).map((row) => (
-                                        <MetricLineChart
-                                            key={`drawer-chart-${row.key}`}
-                                            label={row.label}
-                                            values={row.values}
-                                            xLabels={drawerTimelineLabels}
-                                            unit={row.unit}
-                                        />
-                                    ))}
-                                </section>
-                            )}
-                        </aside>
-                    </>
-                )}
+                <CaseStudyDrawer
+                    caseStudy={selectedCaseDetail}
+                    onClose={() => setSelectedCaseDetail(null)}
+                    onEdit={handleEditCase}
+                />
             </div>
         </div>
     );
