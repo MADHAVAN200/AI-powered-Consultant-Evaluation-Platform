@@ -2,8 +2,11 @@ import React, { useMemo, useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useData } from '../context/DataContext';
+import PageLoader from '../components/PageLoader';
 import './Assessment.css';
+import SidebarCard from '../components/SidebarCard';
 import { API_BASE } from '../config/api';
+import MetricChart from '../components/MetricLineChart';
 
 const getSystemTheme = () => (
     window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
@@ -63,11 +66,11 @@ const renderFormattedMessage = (content) => {
             if (groupType !== 'numbered') { flushGroup(); groupType = 'numbered'; }
             globalCounter++;
             currentGroup.push(line.replace(/^\d+[).:] ?/, '').trim());
-        // Bullet: "- ...", "• ...", "→ ...", "— ..."
+            // Bullet: "- ...", "• ...", "→ ...", "— ..."
         } else if (/^[-•→—]\s/.test(line)) {
             if (groupType !== 'bullets') { flushGroup(); groupType = 'bullets'; }
             currentGroup.push(line.replace(/^[-•→—]\s/, '').trim());
-        // Section label: all-caps ending in colon, short
+            // Section label: all-caps ending in colon, short
         } else if (line.endsWith(':') && line.length < 40 && line === line.toUpperCase() && /[A-Z]/.test(line)) {
             flushGroup();
             elements.push(<p key={elements.length} className="msg-section-label">{line}</p>);
@@ -182,15 +185,7 @@ const parseSectionCards = (content = '') => {
     };
 };
 
-// ─── Sidebar Section Card ──────────────────────────────────────────────────
-const SidebarCard = ({ label, variant = 'default', children }) => (
-    <div className={`sidebar-card sidebar-card--${variant}`}>
-        <div className="sidebar-card__header">
-            <h3 className="sidebar-card__title">{label}</h3>
-        </div>
-        <div className="sidebar-card__body">{children}</div>
-    </div>
-);
+
 
 
 // ─── Spark Bar Chart ───────────────────────────────────────────────────────
@@ -250,7 +245,7 @@ const getMetricFocusArea = (label = '') => {
 const isMetricsSection = (section) => {
     if (!section || typeof section !== 'object') return false;
     if (String(section.role || '').toLowerCase() === 'data') return true;
-    
+
     const heading = String(section.heading || '').toLowerCase();
     const sourceKey = String(section.sourceKey || '').toLowerCase();
     const content = String(section.content || '').toLowerCase();
@@ -274,35 +269,46 @@ const extractInlineSeries = (text = '') => {
     let pendingLabel = '';
 
     for (const line of lines) {
-        const stripped = line.replace(/^[•\-\*]\s*/, '').trim();
-        const kvMatch = stripped.match(/^([^:]{1,60}):\s*([-+]?\d[\d,.]*(?:\.\d+)?)\s*([A-Za-z%/]*)\s*$/);
+        // Strip leading bullet/dash chars including the new dot char
+        const stripped = line.replace(/^[•\-\*●]\s*/, '').trim();
+
+        // Match "Label: number optional_unit" e.g. "January: 26 Lakhs" or "Revenue: 1.2 Cr"
+        // Lenient match to allow notes after the number
+        const kvMatch = stripped.match(/^([^:]{1,60}):\s*([-+]?\d[\d,.]*(?:\.\d+)?)\s*([A-Za-z%/]*)(?:\s.*)?$/);
         if (kvMatch) {
             const pointLabel = kvMatch[1].trim();
-            const value = parseFloat(kvMatch[2].replace(/,/g, ''));
+            let value = parseFloat(kvMatch[2].replace(/,/g, ''));
+            const unitSuffix = (kvMatch[3] || '').toLowerCase();
+            
             if (Number.isFinite(value)) {
+                // Normalize values based on units for better charting
+                if (unitSuffix === 'cr') value *= 100; // Work in Lakhs for financial units
+                else if (unitSuffix === 'm') value *= 10; // Millions to Lakhs (approx)
+                else if (unitSuffix === 'k') value /= 100; // Thousands to Lakhs
+                
                 if (!currentGroup) {
-                    currentGroup = { groupLabel: pendingLabel || 'Series', points: [] };
+                    currentGroup = { groupLabel: pendingLabel || 'Series', points: [], unit: unitSuffix || 'count' };
                     groups.push(currentGroup);
                 }
-                currentGroup.points.push({ label: pointLabel, value });
+                currentGroup.points.push({ label: pointLabel, value, rawValue: parseFloat(kvMatch[2].replace(/,/g, '')), unit: unitSuffix });
                 continue;
             }
         }
 
+        // Non-numeric line: flush group if it has < 2 points
         if (currentGroup) {
             if (currentGroup.points.length < 2) groups.pop();
             currentGroup = null;
         }
-
+        // Use subheadings / short lines as group labels for the NEXT series
         if (stripped.length > 0 && stripped.length < 60 && !stripped.includes('.') && stripped.endsWith(':')) {
             pendingLabel = stripped.slice(0, -1).trim();
-        } else if (stripped.length > 0 && stripped.length < 60) {
+        } else if (stripped.length > 0 && stripped.length < 60 && !stripped.includes('•')) {
             pendingLabel = stripped;
         }
     }
 
     if (currentGroup && currentGroup.points.length < 2) groups.pop();
-
     return groups.filter((g) => g.points.length >= 2);
 };
 
@@ -359,8 +365,14 @@ const candidateTouchesMetric = (metricLabel = '', candidateText = '') => {
     return metricWords.some((w) => candidateWords.has(w));
 };
 
-const buildCockpitMetrics = (financialData = {}, latestCandidateAnswer = '', totalScore = null) => {
-    const entries = Object.entries(financialData || {}).filter(([, v]) => Array.isArray(v) && v.length > 1);
+const buildCockpitMetrics = (metricSource = {}, latestCandidateAnswer = '', totalScore = null) => {
+    const entries = Object.entries(metricSource || {})
+        .map(([key, raw]) => {
+            const values = Array.isArray(raw) ? raw : (Array.isArray(raw?.values) ? raw.values : []);
+            return [key, values];
+        })
+        .filter(([, values]) => Array.isArray(values) && values.length > 1);
+
     const cards = entries.map(([key, values]) => {
         const numericValues = values.map(Number).filter(Number.isFinite);
         if (numericValues.length < 2) return null;
@@ -371,7 +383,7 @@ const buildCockpitMetrics = (financialData = {}, latestCandidateAnswer = '', tot
         const delta = current - baseline;
         const deltaPct = baseline !== 0 ? (delta / Math.abs(baseline)) * 100 : 0;
         const isImproving = direction === 'higher' ? current >= baseline : current <= baseline;
-        const touched = candidateTouchesMetric(key, latestCandidateAnswer);
+        const touched = candidateTouchesMetric(`${key} ${prettifyMetricLabel(key)}`, latestCandidateAnswer);
         const focusArea = getMetricFocusArea(key);
 
         const rubricInfluence = Number.isFinite(totalScore)
@@ -551,7 +563,7 @@ const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep
 const inferMetricUnit = (key = '', values = []) => {
     const k = String(key).toLowerCase();
     const maxVal = Math.max(...values.map((n) => Math.abs(Number(n) || 0)), 0);
-    const looksMonetary = /(revenue|sales|spend|budget|marketing|logistics|cost|profit|income|ebitda|cash|investment|pricing|price|arpu|cac|ltv|aov|gmv|arr|mrr|dollar)/.test(k);
+    const looksMonetary = /(revenue|sales|spend|budget|marketing|logistics|cost|profit|income|expense|asset|liabilit|balance sheet|asset|liabilit|cash flow|income statement)/.test(k);
 
     if (k.includes('pct') || k.includes('percent') || k.includes('rate') || k.includes('margin')) return 'percent';
     if (k.includes('ratio')) return 'ratio';
@@ -615,69 +627,7 @@ const aggregateQuarterly = (values = []) => {
     return chunks;
 };
 
-const MetricLineChart = ({ label, values = [], xLabels = [], unit = 'count' }) => {
-    const nums = values.map(Number).filter(Number.isFinite);
-    if (nums.length < 2) return null;
 
-    const width = 360;
-    const height = 190;
-    const leftPad = 44;
-    const rightPad = 14;
-    const topPad = 14;
-    const bottomPad = 36;
-    const plotW = width - leftPad - rightPad;
-    const plotH = height - topPad - bottomPad;
-
-    const min = Math.min(...nums);
-    const max = Math.max(...nums);
-    const span = Math.max(1, max - min);
-    const yMin = min - span * 0.1;
-    const yMax = max + span * 0.1;
-
-    const xAt = (i) => leftPad + (i * plotW) / Math.max(1, nums.length - 1);
-    const yAt = (v) => topPad + ((yMax - v) * plotH) / Math.max(0.0001, yMax - yMin);
-
-    const points = nums.map((v, i) => `${xAt(i)},${yAt(v)}`).join(' ');
-    const yTicks = 4;
-    const tickValues = Array.from({ length: yTicks + 1 }, (_, i) => yMin + ((yMax - yMin) * i) / yTicks);
-
-    return (
-        <article className="line-chart-card">
-            <div className="line-chart-header">
-                <h4>{label}</h4>
-                <span>{unitDisplayLabel(unit)}</span>
-            </div>
-            <svg className="line-chart-svg" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${label} line chart`}>
-                <line x1={leftPad} y1={topPad} x2={leftPad} y2={topPad + plotH} className="axis-line" />
-                <line x1={leftPad} y1={topPad + plotH} x2={leftPad + plotW} y2={topPad + plotH} className="axis-line" />
-
-                {tickValues.map((t, idx) => {
-                    const y = yAt(t);
-                    return (
-                        <g key={idx}>
-                            <line x1={leftPad} y1={y} x2={leftPad + plotW} y2={y} className="grid-line" />
-                            <text x={leftPad - 6} y={y + 3} className="tick-label" textAnchor="end">{formatAxisTickValue(t, unit)}</text>
-                        </g>
-                    );
-                })}
-
-                <polyline points={points} className="series-line" />
-                {nums.map((v, i) => (
-                    <circle key={i} cx={xAt(i)} cy={yAt(v)} r="3" className="series-point" />
-                ))}
-
-                {nums.map((_, i) => (
-                    <text key={`x-${i}`} x={xAt(i)} y={topPad + plotH + 16} className="tick-label" textAnchor="middle">
-                        {xLabels[i] || `P${i + 1}`}
-                    </text>
-                ))}
-
-                <text x={leftPad + plotW / 2} y={height - 4} className="axis-title" textAnchor="middle">Time</text>
-                <text x={leftPad} y={10} className="axis-title" textAnchor="start">Y: {unitDisplayLabel(unit)}</text>
-            </svg>
-        </article>
-    );
-};
 
 const getParsedSectionsFromCase = (caseStudy = {}) => {
     const rawSections = caseStudy?.parsed_sections ?? caseStudy?.parsedSections ?? {};
@@ -904,6 +854,8 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
     const [theme, setTheme] = useState(getInitialTheme);
     const [leftWidth, setLeftWidth] = useState(() => window.innerWidth <= 1280 ? 280 : 300);
     const [rightWidth, setRightWidth] = useState(() => window.innerWidth <= 1280 ? 340 : 370);
+    const [isLeftPanelOpen, setIsLeftPanelOpen] = useState(true);
+    const [isRightPanelOpen, setIsRightPanelOpen] = useState(true);
     const [questionTracker, setQuestionTracker] = useState([]);
     const [activeQuestionIndex, setActiveQuestionIndex] = useState(0);
     const [questionAnswerLog, setQuestionAnswerLog] = useState({});
@@ -940,7 +892,14 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
     };
 
     useEffect(() => { validateAndStart(); }, [inviteId, caseStudyId, isDemo, isDirectCase, userEmail]);
-    useEffect(() => { document.body.classList.add('assessment-lock'); return () => document.body.classList.remove('assessment-lock'); }, []);
+    useEffect(() => {
+        document.documentElement.classList.add('candidate-scroll-unlock');
+        document.body.classList.add('candidate-scroll-unlock');
+        return () => {
+            document.documentElement.classList.remove('candidate-scroll-unlock');
+            document.body.classList.remove('candidate-scroll-unlock');
+        };
+    }, []);
     useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
     useEffect(() => {
         document.documentElement.setAttribute('data-theme', theme);
@@ -1336,10 +1295,10 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
         const numericFromParsed = (parsedSections && typeof parsedSections._numericSeries === 'object')
             ? Object.fromEntries(
                 Object.entries(parsedSections._numericSeries).map(([k, v]) => [
-                    k, 
-                    { 
+                    k,
+                    {
                         values: Array.isArray(v?.values) ? v.values : [],
-                        sourceSectionId: v?.sourceSectionId || null 
+                        sourceSectionId: v?.sourceSectionId || null
                     }
                 ])
             )
@@ -1365,7 +1324,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
     );
 
     // Phase step labels
-    const stepNames  = { diagnostic: 'Diagnose', brainstorming: 'Brainstorm', calculations: 'Calculate', final_recommendation: 'Recommend' };
+    const stepNames = { diagnostic: 'Diagnose', brainstorming: 'Brainstorm', calculations: 'Calculate', final_recommendation: 'Recommend' };
 
     const timelineLabels = useMemo(() => {
         const seriesLen = Math.max(...Object.values(mergedNumericData || {}).map((v) => (Array.isArray(v) ? v.length : 0)), 0);
@@ -1438,7 +1397,9 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
             }
 
             const delta = nextValues.length > 1 ? nextValues[lastIdx] - nextValues[0] : 0;
-            const improving = getMetricDirection(row.key) === 'higher' ? nextValues[lastIdx] >= nextValues[0] : nextValues[lastIdx] <= nextValues[0];
+            const improving = getMetricDirection(row.key || row.label || `series_${idx + 1}`) === 'higher'
+                ? nextValues[lastIdx] >= nextValues[0]
+                : nextValues[lastIdx] <= nextValues[0];
 
             return {
                 ...row,
@@ -1608,15 +1569,16 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
             if (Math.abs(diff) < 0.0001) continue;
             const direction = directionMap[key];
             const isImprovement = direction === 'higher' ? diff > 0 : diff < 0;
-            const shortLabel = String(row.label || '').length > 44
-                ? `${String(row.label).slice(0, 44)}...`
-                : row.label;
-            const entry = `${shortLabel}: ${diff >= 0 ? '+' : ''}${formatMetricValue(diff, row.unit)}`;
+            const entry = `${row.label}: ${diff >= 0 ? '+' : ''}${formatMetricValue(diff, row.unit)}`;
             if (isImprovement) improved.push(entry);
             else worsened.push(entry);
         }
 
-        const missed = dynamicCockpitMetrics.filter((m) => !m.touched).slice(0, 3).map((m) => m.label);
+        const missed = dynamicMetricRows
+            .filter((row) => !candidateTouchesMetric(row.label || row.key, latestActiveQuestionAnswer))
+            .slice(0, 3)
+            .map((row) => row.label);
+
         return {
             title: 'LATEST ANSWER IMPACT',
             improved: improved.slice(0, 4),
@@ -1625,7 +1587,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
             isBaseline: false,
             isReset: false
         };
-    }, [metricRows, dynamicMetricRows, dynamicCockpitMetrics, hasActiveQuestionProgress, activeQuestionId]);
+    }, [metricRows, dynamicMetricRows, hasActiveQuestionProgress, activeQuestionId, latestActiveQuestionAnswer]);
 
     const sidebarImpactSeries = useMemo(() => {
         if (!hasActiveQuestionProgress) return [];
@@ -1721,13 +1683,10 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
 
     // ── Loading / Error screens ──────────────────────────────────────────────
     if (loading) return (
-        <div className="assessment-loading-state">
-            <div className="loading-card glassmorphism">
-                <div className="spinner" />
-                <h2 className="loading-title">INITIALIZING SECURE PROTOCOL</h2>
-                <p className="loading-sub">SYNCING INTELLIGENCE NODES...</p>
-            </div>
-        </div>
+        <PageLoader 
+            message="INITIALIZING SECURE PROTOCOL" 
+            subMessage="SYNCING INTELLIGENCE NODES..." 
+        />
     );
 
     if (error) return (
@@ -1742,20 +1701,32 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
     );
 
     return (
-        <div 
-            className="assessment-portal metric-priority-layout"
-            style={{ '--left-width': `${leftWidth}px`, '--right-width': `${rightWidth}px` }}
+        <div
+            className="assessment-portal metric-priority-layout candidate-assessment-layout"
+            style={{
+                '--left-width': `${isLeftPanelOpen ? leftWidth : 46}px`,
+                '--right-width': `${isRightPanelOpen ? rightWidth : 46}px`,
+                '--left-rail-width': `${isLeftPanelOpen ? 4 : 0}px`,
+                '--right-rail-width': `${isRightPanelOpen ? 4 : 0}px`
+            }}
         >
-            <aside className="assessment-sidebar assessment-sidebar--sections">
-                <div className="sidebar-case-header">
-                    <div className="case-header-top">
-                        <span className="case-tag-pill">CASE BRIEF</span>
-                        <span className="time-pill">30 min</span>
-                    </div>
-                    <h2 className="case-title">Case Sections</h2>
-                    <p className="case-industry">Navigate the full brief before responding</p>
-                </div>
+            <aside className={`assessment-sidebar assessment-sidebar--sections ${isLeftPanelOpen ? '' : 'is-collapsed'}`}>
+                <button
+                    type="button"
+                    className={`sidebar-rail-icon sidebar-rail-icon--left ${isLeftPanelOpen ? 'is-active' : ''}`}
+                    onClick={() => setIsLeftPanelOpen((prev) => !prev)}
+                    aria-label={isLeftPanelOpen ? 'Collapse section navigator' : 'Expand section navigator'}
+                    title={isLeftPanelOpen ? 'Collapse section navigator' : 'Expand section navigator'}
+                >
+                    <span className="hamburger-lines" aria-hidden="true">
+                        <i />
+                        <i />
+                        <i />
+                    </span>
+                </button>
 
+                {isLeftPanelOpen && (
+                    <>
                 <SidebarCard label="Section Navigator">
                     <div className="sidebar-section-nav" aria-label="Candidate section flow">
                         {briefSections.map((s) => (
@@ -1809,215 +1780,271 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                         <span><i className="dot dot--yellow" />Flagged for later</span>
                     </div>
                 </SidebarCard>
+                    </>
+                )}
             </aside>
 
             <div className="resize-handle" onMouseDown={startLeftResize} title="Drag to resize" />
 
             <main className="metrics-workspace">
-                <header className="workspace-header">
-                    <div>
-                        <h1 className="workspace-title">{caseStudy.title}</h1>
-                        {caseStudy.industry && (
-                            <p className="workspace-subtitle">{caseStudy.industry}</p>
-                        )}
-                    </div>
-                    <div className="workspace-actions">
-                        <div className="score-chip">
-                            <div className="score-chip__label">LIVE SCORE</div>
-                            <div className="score-chip__value">{scoreBreakdown?.totalScore ?? '--'}<span>/100</span></div>
-                            <div className="score-chip__sub">{scoring?.band || 'Pending'} · PASS {passingMarks}</div>
+                <header className="workspace-header-premium">
+                    <div className="header-brand-section">
+                        <div className="case-industry-badge">{caseStudy.industry || 'Management Consulting'}</div>
+                        <h1 className="workspace-title-large">{caseStudy.title}</h1>
+                        <div className="header-meta-row">
+                            <div className="meta-item">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                                <span>60 Min Session</span>
+                            </div>
+                            <div className="meta-item">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+                                <span>Secure Protocol</span>
+                            </div>
                         </div>
-                        <button className="theme-toggle assessment-theme-toggle" onClick={() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))}>
-                            {theme === 'light' ? 'DARK' : 'LIGHT'}
-                        </button>
-                        <div className={`session-status-badge session-status-badge--${status}`}>{status.toUpperCase()}</div>
-                        <button className="btn-exit" onClick={() => navigate(dashboardPath)}>EXIT</button>
+                    </div>
+                    
+                    <div className="workspace-actions-premium">
+                        <div className="score-widget">
+                            <div className="score-widget__head">LIVE EVALUATION</div>
+                            <div className="score-widget__body">
+                                <span className="score-value">{scoreBreakdown?.totalScore ?? '--'}</span>
+                                <span className="score-total">/100</span>
+                            </div>
+                            <div className="score-widget__foot">
+                                <span className={`status-indicator ${scoring?.band?.toLowerCase() || 'pending'}`}></span>
+                                {scoring?.band || 'Calculating...'}
+                            </div>
+                        </div>
+
+                        <div className="action-buttons-cluster">
+                            <button
+                                className="theme-toggle-pill"
+                                onClick={() => setTheme((prev) => (prev === 'light' ? 'dark' : 'light'))}
+                                title={theme === 'light' ? 'Switch to Dark Mode' : 'Switch to Light Mode'}
+                            >
+                                {theme === 'light' ? (
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>
+                                ) : (
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>
+                                )}
+                            </button>
+                            <button className="btn-exit-premium" onClick={() => navigate(dashboardPath)}>
+                                <span>Terminate Session</span>
+                            </button>
+                        </div>
                     </div>
                 </header>
 
-                {activeSectionData && (
-                <section className="case-content-pane" aria-label={`${activeSectionData.heading} content`}>
-                    <article className="main-section-card">
-                        <h3 style={{ textTransform: 'uppercase', marginBottom: '16px', letterSpacing: '0.04em' }}>{activeSectionData.heading}</h3>
-                        {(() => {
-                            const { summary, blocks } = parseSectionCards(activeSectionData.content);
-                            if (blocks.length === 0) {
-                                return (
-                                    <div className="section-inline-content">
-                                        {renderSectionContent(activeSectionData.content)}
-                                    </div>
-                                );
-                            }
+                <div className="workspace-content-scroll">
+                    {activeSectionData && (
+                        <section className="case-content-pane-premium" aria-label={`${activeSectionData.heading} content`}>
 
-                            return (
-                                <div className="section-breakdown-grid">
-                                    {summary && <div className="section-breakdown-summary">{summary}</div>}
-                                    {blocks.map((block, index) => (
-                                        <article className="section-breakdown-card" key={`${activeSectionData.id}-block-${index}`}>
-                                            <div className="section-breakdown-card__title">{block.heading}</div>
-                                            <div className="section-breakdown-card__body">
-                                                {block.items.map((item, itemIndex) => (
-                                                    <div className="section-breakdown-item" key={`${activeSectionData.id}-item-${index}-${itemIndex}`}>
-                                                        {item}
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        </article>
-                                    ))}
-                                </div>
-                            );
-                        })()}
-                    </article>
-
-                    {activeInlineSeries.length > 0 && !sectionHasDataMetrics && !isMetricsSection(activeSectionData) && (
-                        <>
-                            <div style={{
-                                marginTop: '16px',
-                                padding: '12px 0 4px',
-                                fontSize: '0.72rem',
-                                fontWeight: 700,
-                                letterSpacing: '0.08em',
-                                color: 'var(--text-secondary)',
-                                textTransform: 'uppercase',
-                            }}>
-                                Data Visualisation
+                        <div className="content-card-premium">
+                            <div className="content-card-header">
+                                <div className="section-label-chip">{activeSectionData.role?.toUpperCase() || 'DOCUMENT'}</div>
+                                <h3 className="section-heading-large">{activeSectionData.heading}</h3>
                             </div>
-                            <section className="trend-strip" style={{ marginTop: '8px', flexWrap: 'wrap', gap: '12px' }}>
-                                {activeInlineSeries.map((series, si) => (
-                                    <MetricLineChart
-                                        key={`${activeSectionData.id}-series-${si}`}
-                                        label={series.groupLabel}
-                                        values={series.points.map((p) => p.value)}
-                                        xLabels={series.points.map((p) => p.label)}
-                                        unit="count"
-                                    />
-                                ))}
-                            </section>
-                        </>
-                    )}
-                </section>
-                )}
-
-                {sectionHasDataMetrics && displayedMetricRows.length > 0 && (
-                <>
-                <section className="metric-legend-strip" aria-label="Units and indicator legend" style={{ marginTop: '14px' }}>
-                    <div className="metric-legend-group">
-                        <span className="metric-legend-title">Units</span>
-                        {displayedUnitLegend.map((entry) => (
-                            <span key={`unit-${entry.unit}`} className="metric-legend-chip">{entry.label}</span>
-                        ))}
-                    </div>
-                </section>
-
-                <section className="kpi-rail" aria-label="Executive KPI rail">
-                    {displayedKpis.slice(0, 8).map((metric) => (
-                        <article key={metric.key} className={`kpi-tile ${metric.isImproving ? 'up' : 'down'}`}>
-                            <p className="kpi-tile__name">{metric.label}</p>
-                            <p className="kpi-tile__unit">{unitDisplayLabel(metric.unit)}</p>
-                            <p className="kpi-tile__value">{formatMetricValue(metric.current, metric.unit)}</p>
-                            <p className={`kpi-tile__delta ${metric.delta >= 0 ? 'positive' : 'negative'}`}>
-                                {metric.delta >= 0 ? '+' : '-'}{formatMetricValue(Math.abs(metric.delta), metric.unit)} ({metric.deltaPct >= 0 ? '+' : ''}{metric.deltaPct.toFixed(1)}%)
-                            </p>
-                        </article>
-                    ))}
-                </section>
-
-                <section className="metrics-deep-dive metrics-deep-dive--single" style={{ marginTop: '10px' }}>
-                    <div className="table-card">
-                        <div className="table-card__header">
-                            <h3>Section Metrics Breakdown</h3>
-                            <p>{`Answer-driven changes for ${activeQuestion ? `Q${activeQuestion.index + 1}` : 'the current question'} including follow-up/counter-question responses`}</p>
-                        </div>
-                        <div className="metrics-table-wrap">
-                            <table className="metrics-table">
-                                <thead>
-                                    <tr>
-                                        <th>Parameter</th>
-                                        <th>Unit</th>
-                                        {displayedTimelineLabels.map((label, idx) => <th key={`${label}-${idx}`}>{label}</th>)}
-                                        <th>Trend</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {displayedMetricRows.map((row) => (
-                                        <tr key={row.key}>
-                                            <td className="sticky-col">{row.label}</td>
-                                            <td>{unitDisplayLabel(row.unit)}</td>
-                                            {displayedTimelineLabels.map((_, idx) => {
-                                                const val = row.values[idx];
-                                                return (
-                                                    <td key={`${row.key}-${idx}`}>
-                                                        {val !== undefined ? formatMetricValue(val, row.unit) : '—'}
-                                                    </td>
-                                                );
-                                            })}
-                                            <td className={`trend-cell ${row.improving ? 'trend-positive' : 'trend-negative'}`}>{row.improving ? 'Improving' : 'Down'}</td>
-                                        </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </section>
-
-                <section className="metrics-deep-dive metrics-deep-dive--single" style={{ marginTop: '10px' }}>
-                    <div className="table-card">
-                        <div className="table-card__header">
-                            <h3>Metric Heatmap</h3>
-                            <p>Each row is a parameter; darker cells indicate larger values in that series.</p>
-                        </div>
-                        <div className="metrics-table-wrap">
-                            <div className="metric-heatmap-wrap">
-                                {displayedMetricRows.slice(0, 8).map((row) => {
-                                    const values = row.values.map(Number).filter(Number.isFinite);
-                                    const min = Math.min(...values);
-                                    const max = Math.max(...values);
-                                    const span = Math.max(0.0001, max - min);
+                            
+                            <div className="content-card-body">
+                                {(() => {
+                                    const { summary, blocks } = parseSectionCards(activeSectionData.content);
+                                    if (blocks.length === 0) {
+                                        return (
+                                            <div className="prose-content">
+                                                {renderSectionContent(activeSectionData.content)}
+                                            </div>
+                                        );
+                                    }
 
                                     return (
-                                        <div key={`heat-${row.key}`} className="metric-heatmap-row">
-                                            <div className="metric-heatmap-row__label">{row.label}</div>
-                                            <div className="metric-heatmap-cells">
-                                                {displayedTimelineLabels.map((label, idx) => {
-                                                    const value = values[idx];
-                                                    if (value === undefined) {
-                                                        return <div key={`heat-${row.key}-${idx}`} className="metric-heatmap-cell metric-heatmap-cell--empty">—</div>;
-                                                    }
-                                                    const normalized = (value - min) / span;
-                                                    const alpha = 0.16 + normalized * 0.78;
-                                                    return (
-                                                        <div
-                                                            key={`heat-${row.key}-${idx}`}
-                                                            className="metric-heatmap-cell"
-                                                            style={{ background: `rgba(31,111,235,${alpha.toFixed(3)})` }}
-                                                            title={`${row.label} · ${label}: ${formatMetricValue(value, row.unit)}`}
-                                                        >
-                                                            <span>{label}</span>
-                                                            <strong>{formatAxisTickValue(value, row.unit)}</strong>
+                                        <div className="structured-breakdown-grid">
+                                            {summary && <div className="breakdown-summary-prose">{summary}</div>}
+                                            <div className="breakdown-cards-container">
+                                                {blocks.map((block, index) => (
+                                                    <article className="premium-breakdown-card" key={`${activeSectionData.id}-block-${index}`}>
+                                                        <div className="breakdown-card-icon">
+                                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 11 12 14 22 4"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>
                                                         </div>
-                                                    );
-                                                })}
+                                                        <div className="breakdown-card-content">
+                                                            <h4 className="breakdown-card-title">{block.heading}</h4>
+                                                            <ul className="breakdown-card-list">
+                                                                {block.items.map((item, itemIndex) => (
+                                                                    <li key={`${activeSectionData.id}-item-${index}-${itemIndex}`}>
+                                                                        {String(item || '').replace(/^[\s\-•●*]+/, '')}
+                                                                    </li>
+                                                                ))}
+                                                            </ul>
+                                                        </div>
+                                                    </article>
+                                                ))}
                                             </div>
                                         </div>
                                     );
-                                })}
+                                })()}
                             </div>
                         </div>
-                    </div>
-                </section>
 
-                <section className="trend-strip" style={{ marginTop: '10px' }}>
-                    {displayedMetricRows.slice(0, 6).map((row) => (
-                        <MetricLineChart
-                            key={row.key}
-                            label={row.label}
-                            values={row.values}
-                            xLabels={displayedTimelineLabels}
-                            unit={row.unit}
-                        />
-                    ))}
-                </section>
-                </>
+                        {activeInlineSeries.length > 0 && !sectionHasDataMetrics && !isMetricsSection(activeSectionData) && (
+                            <>
+                                <div style={{
+                                    marginTop: '16px',
+                                    padding: '12px 0 4px',
+                                    fontSize: '0.72rem',
+                                    fontWeight: 700,
+                                    letterSpacing: '0.08em',
+                                    color: 'var(--text-secondary)',
+                                    textTransform: 'uppercase',
+                                }}>
+                                    Data Visualisation
+                                </div>
+                                <section className="trend-strip" style={{ marginTop: '8px', flexWrap: 'wrap', gap: '12px' }}>
+                                    {activeInlineSeries.map((series, si) => {
+                                        const hasNegatives = series.points.some(p => p.value < 0);
+                                        const chartType = hasNegatives ? 'line' : (si % 2 === 0 ? 'line' : 'bar');
+                                        return (
+                                            <MetricChart
+                                                key={`${activeSectionData.id}-series-${si}`}
+                                                label={series.groupLabel}
+                                                values={series.points.map((p) => p.value)}
+                                                xLabels={series.points.map((p) => p.label)}
+                                                unit={series.unit || 'count'}
+                                                type={chartType}
+                                                color={['#8957e5', '#238636', '#d29922', '#bf3989', '#1f6feb'][si % 5]}
+                                            />
+                                        );
+                                    })}
+                                </section>
+                            </>
+                        )}
+                    </section>
+                )}
+
+                {sectionHasDataMetrics && displayedMetricRows.length > 0 && (
+                    <>
+                        <section className="metric-legend-strip" aria-label="Units and indicator legend" style={{ marginTop: '14px' }}>
+                            <div className="metric-legend-group">
+                                <span className="metric-legend-title">Units</span>
+                                {displayedUnitLegend.map((entry) => (
+                                    <span key={`unit-${entry.unit}`} className="metric-legend-chip">{entry.label}</span>
+                                ))}
+                            </div>
+                        </section>
+
+                        <section className="kpi-rail" aria-label="Executive KPI rail">
+                            {displayedKpis.slice(0, 8).map((metric) => (
+                                <article key={metric.key} className="kpi-tile">
+                                    <p className="kpi-tile__name">{metric.label}</p>
+                                    <div className="kpi-tile__value">{formatMetricValue(metric.current, metric.unit)}</div>
+                                    <div className={`kpi-tile-delta ${metric.deltaPct >= 0 ? 'pos' : 'neg'}`}>
+                                        {metric.deltaPct >= 0 ? '▲' : '▼'} {Math.abs(metric.deltaPct).toFixed(1)}%
+                                    </div>
+                                    <p className="kpi-tile__unit">{unitDisplayLabel(metric.unit)}</p>
+                                </article>
+                            ))}
+                        </section>
+
+                        <section className="metrics-deep-dive metrics-deep-dive--single" style={{ marginTop: '10px' }}>
+                            <div className="table-card">
+                                <div className="table-card__header">
+                                    <h3>Section Metrics Breakdown</h3>
+                                    <p>{`Answer-driven changes for ${activeQuestion ? `Q${activeQuestion.index + 1}` : 'the current question'} including follow-up/counter-question responses`}</p>
+                                </div>
+                                <div className="metrics-table-wrap">
+                                    <table className="metrics-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Parameter</th>
+                                                <th>Unit</th>
+                                                {displayedTimelineLabels.map((label, idx) => <th key={`${label}-${idx}`}>{label}</th>)}
+                                                <th>Trend</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {displayedMetricRows.map((row) => (
+                                                <tr key={row.key}>
+                                                    <td className="sticky-col">{row.label}</td>
+                                                    <td>{unitDisplayLabel(row.unit)}</td>
+                                                    {displayedTimelineLabels.map((_, idx) => {
+                                                        const val = row.values[idx];
+                                                        return (
+                                                            <td key={`${row.key}-${idx}`}>
+                                                                {val !== undefined ? formatMetricValue(val, row.unit) : '—'}
+                                                            </td>
+                                                        );
+                                                    })}
+                                                    <td className={`trend-cell ${row.improving ? 'trend-positive' : 'trend-negative'}`}>{row.improving ? 'Improving' : 'Down'}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </section>
+
+                        <section className="metrics-deep-dive metrics-deep-dive--single" style={{ marginTop: '10px' }}>
+                            <div className="table-card">
+                                <div className="table-card__header">
+                                    <h3>Metric Heatmap</h3>
+                                    <p>Each row is a parameter; darker cells indicate larger values in that series.</p>
+                                </div>
+                                <div className="metrics-table-wrap">
+                                    <div className="metric-heatmap-wrap">
+                                        {displayedMetricRows.slice(0, 8).map((row) => {
+                                            const values = row.values.map(Number).filter(Number.isFinite);
+                                            const min = Math.min(...values);
+                                            const max = Math.max(...values);
+                                            const span = Math.max(0.0001, max - min);
+
+                                            return (
+                                                <div key={`heat-${row.key}`} className="metric-heatmap-row">
+                                                    <div className="metric-heatmap-row__label">{row.label}</div>
+                                                    <div className="metric-heatmap-cells">
+                                                        {displayedTimelineLabels.map((label, idx) => {
+                                                            const value = values[idx];
+                                                            if (value === undefined) {
+                                                                return <div key={`heat-${row.key}-${idx}`} className="metric-heatmap-cell metric-heatmap-cell--empty">—</div>;
+                                                            }
+                                                            const normalized = (value - min) / span;
+                                                            const alpha = 0.16 + normalized * 0.78;
+                                                            return (
+                                                                <div
+                                                                    key={`heat-${row.key}-${idx}`}
+                                                                    className="metric-heatmap-cell"
+                                                                    style={{ background: `rgba(31,111,235,${alpha.toFixed(3)})` }}
+                                                                    title={`${row.label} · ${label}: ${formatMetricValue(value, row.unit)}`}
+                                                                >
+                                                                    <span>{label}</span>
+                                                                    <strong>{formatAxisTickValue(value, row.unit)}</strong>
+                                                                </div>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+
+                        <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '16px', marginTop: '16px' }}>
+                            {displayedMetricRows.slice(0, 6).map((row, si) => {
+                                const hasNegatives = row.values.some(v => v < 0);
+                                const chartType = hasNegatives ? 'line' : (si % 2 === 0 ? 'line' : 'bar');
+                                return (
+                                    <MetricChart
+                                        key={row.key}
+                                        label={row.label}
+                                        values={row.values}
+                                        xLabels={displayedTimelineLabels}
+                                        unit={row.unit}
+                                        type={chartType}
+                                        color={['#8957e5', '#238636', '#d29922', '#bf3989', '#1f6feb'][si % 5]}
+                                    />
+                                );
+                            })}
+                        </section>
+                    </>
                 )}
 
                 {activeCaseSection === 'simulation' && mockDrillEnabled && (
@@ -2141,19 +2168,50 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                         </section>
                     </>
                 )}
+                </div>
             </main>
 
             <div className="resize-handle" onMouseDown={startRightResize} title="Drag to resize" />
 
-            <aside className="chat-dock">
+            <aside className={`chat-dock ${isRightPanelOpen ? '' : 'is-collapsed'}`}>
+                {!isRightPanelOpen && (
+                    <button
+                        type="button"
+                        className={`sidebar-rail-icon sidebar-rail-icon--right ${isRightPanelOpen ? 'is-active' : ''}`}
+                        onClick={() => setIsRightPanelOpen((prev) => !prev)}
+                        aria-label={isRightPanelOpen ? 'Collapse chatbot panel' : 'Expand chatbot panel'}
+                        title={isRightPanelOpen ? 'Collapse chatbot panel' : 'Expand chatbot panel'}
+                    >
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
+                            <path d="M5 7.5A2.5 2.5 0 0 1 7.5 5h9A2.5 2.5 0 0 1 19 7.5v5A2.5 2.5 0 0 1 16.5 15H11l-3.5 3V15H7.5A2.5 2.5 0 0 1 5 12.5v-5Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                        </svg>
+                    </button>
+                )}
+
+                {isRightPanelOpen && (
+                    <>
                 <header className="chat-dock__header">
-                    <div className="interviewer-info">
-                        <div className="avatar-mbb">AI</div>
-                        <div>
-                            <p className="interviewer-name">Case Interview Bot</p>
-                            <p className="interviewer-status"><span className="status-dot" /> {stepNames[currentStep]} phase</p>
+                    <div className="interviewer-header-row">
+                        <div className="interviewer-info">
+                            <div className="avatar-mbb">AI</div>
+                            <div>
+                                <p className="interviewer-name">Case Interview Bot</p>
+                                <p className="interviewer-status"><span className="status-dot" /> {stepNames[currentStep]} phase</p>
+                            </div>
                         </div>
+                        <button
+                            type="button"
+                            className={`sidebar-rail-icon-inline ${isRightPanelOpen ? 'is-active' : ''}`}
+                            onClick={() => setIsRightPanelOpen((prev) => !prev)}
+                            aria-label="Collapse chatbot panel"
+                            title="Collapse chatbot panel"
+                        >
+                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" aria-hidden="true">
+                                <path d="M5 7.5A2.5 2.5 0 0 1 7.5 5h9A2.5 2.5 0 0 1 19 7.5v5A2.5 2.5 0 0 1 16.5 15H11l-3.5 3V15H7.5A2.5 2.5 0 0 1 5 12.5v-5Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                            </svg>
+                        </button>
                     </div>
+
                     <div className="strike-hud">
                         <span className="strike-hud__label">STRIKES</span>
                         <div className="strike-dots">
@@ -2241,7 +2299,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                         </div>
                     )}
 
-                    
+
 
                 </header>
 
@@ -2262,53 +2320,70 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                 </div>
 
                 {status === 'active' && !allQuestionsClosed ? (
-                    <form className="chat-input-form" onSubmit={handleSendMessage}>
-                        <div className="chat-input-wrap prompt-composer">
-                            <textarea
-                                className="chat-textarea prompt-text-input"
-                                value={input}
-                                onChange={(e) => setInput(e.target.value)}
-                                placeholder="Type a message..."
-                                onKeyDown={(e) => {
-                                    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(e); }
-                                }}
-                                rows={1}
-                                disabled={activeQuestionClosed}
-                            />
-                            <div className="prompt-actions">
-                                {!input.trim() ? (
-                                    <button
-                                        type="button"
-                                        className={`chat-send-btn prompt-send-btn ${isListening ? 'active' : ''}`}
-                                        onClick={toggleSpeechToText}
-                                        disabled={!speechSupported || activeQuestionClosed || isSending}
-                                        aria-label={isListening ? 'Stop voice input' : 'Start voice input'}
-                                        title={isListening ? 'Stop voice input' : 'Start voice input'}
-                                        style={isListening ? { background: '#f85149', boxShadow: '0 0 12px rgba(248, 81, 73, 0.4)' } : {}}
-                                    >
-                                        <svg viewBox="0 0 24 24" width="26" height="26" fill="none">
-                                            <rect x="9" y="3" width="6" height="10" rx="3" stroke="currentColor" strokeWidth="2.4" />
-                                            <path d="M6 10.5C6 14.09 8.91 17 12.5 17C16.09 17 19 14.09 19 10.5" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
-                                            <path d="M12.5 17V21" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
-                                        </svg>
-                                    </button>
-                                ) : (
-                                    <button 
-                                        type="submit" 
-                                        className="chat-send-btn prompt-send-btn" 
-                                        disabled={isSending || activeQuestionClosed} 
-                                        aria-label="Send"
-                                    >
-                                        <svg viewBox="0 0 24 24" width="26" height="26" fill="none">
-                                            <path d="M12 6V18" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
-                                            <path d="M7 11L12 6L17 11" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
-                                        </svg>
-                                    </button>
-                                )}
+                    activeQuestionClosed ? (
+                        <div className="chat-input-form">
+                            <div className="question-closed-notice" role="status" aria-live="polite">
+                                <strong>
+                                    {activeQuestion?.status === 'passed'
+                                        ? 'This question is already passed.'
+                                        : 'This question is locked after failed attempts.'}
+                                </strong>
+                                <p>
+                                    {activeQuestion?.status === 'passed'
+                                        ? 'Use Next Question or pick another open question from the tracker.'
+                                        : 'You cannot submit more responses for this question. Move to another open question.'}
+                                </p>
                             </div>
                         </div>
-                        {speechError && <p className="input-hint speech-error-hint">{speechError}</p>}
-                    </form>
+                    ) : (
+                        <form className="chat-input-form" onSubmit={handleSendMessage}>
+                            <div className="chat-input-wrap prompt-composer">
+                                <textarea
+                                    className="chat-textarea prompt-text-input"
+                                    value={input}
+                                    onChange={(e) => setInput(e.target.value)}
+                                    placeholder="Type a message..."
+                                    onKeyDown={(e) => {
+                                        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSendMessage(e); }
+                                    }}
+                                    rows={1}
+                                    disabled={activeQuestionClosed}
+                                />
+                                <div className="prompt-actions">
+                                    {!input.trim() ? (
+                                        <button
+                                            type="button"
+                                            className={`chat-send-btn prompt-send-btn ${isListening ? 'active' : ''}`}
+                                            onClick={toggleSpeechToText}
+                                            disabled={!speechSupported || activeQuestionClosed || isSending}
+                                            aria-label={isListening ? 'Stop voice input' : 'Start voice input'}
+                                            title={isListening ? 'Stop voice input' : 'Start voice input'}
+                                            style={isListening ? { background: '#f85149', boxShadow: '0 0 12px rgba(248, 81, 73, 0.4)' } : {}}
+                                        >
+                                            <svg viewBox="0 0 24 24" width="32" height="32" fill="none">
+                                                <rect x="9" y="3" width="6" height="10" rx="3" stroke="currentColor" strokeWidth="2.4" />
+                                                <path d="M6 10.5C6 14.09 8.91 17 12.5 17C16.09 17 19 14.09 19 10.5" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+                                                <path d="M12.5 17V21" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+                                            </svg>
+                                        </button>
+                                    ) : (
+                                        <button
+                                            type="submit"
+                                            className="chat-send-btn prompt-send-btn"
+                                            disabled={isSending || activeQuestionClosed}
+                                            aria-label="Send"
+                                        >
+                                            <svg viewBox="0 0 24 24" width="32" height="32" fill="none">
+                                                <path d="M12 6V18" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
+                                                <path d="M7 11L12 6L17 11" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
+                                            </svg>
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                            {speechError && <p className="input-hint speech-error-hint">{speechError}</p>}
+                        </form>
+                    )
                 ) : (
                     <div className="session-conclusion">
                         <div className="conclusion-icon">{allQuestionsClosed || status === 'completed' ? '✅' : '🚫'}</div>
@@ -2317,7 +2392,10 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                         <button className="btn-primary" onClick={() => navigate(dashboardPath)}>RETURN TO DASHBOARD</button>
                     </div>
                 )}
+                    </>
+                )}
             </aside>
+
         </div>
     );
 };

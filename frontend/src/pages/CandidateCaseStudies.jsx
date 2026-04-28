@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import './AdminEvaluation.css';
 import { API_BASE } from '../config/api';
 import PageLoader from '../components/PageLoader';
+import CaseStudyDrawer from '../components/CaseStudyDrawer';
 
 const getParsedSections = (row = {}) => {
   const raw = row?.parsed_sections ?? row?.parsedSections ?? {};
@@ -166,102 +167,63 @@ const CandidateCaseStudies = () => {
   return (
     <div className="admin-eval-page">
       <div className="admin-eval-layout">
-        <div className="admin-card">
-          <div className="admin-card-title">AVAILABLE CASE STUDIES</div>
-          <div className="admin-hint">Review each case summary and key signals before starting your assessment.</div>
-        </div>
-
-        <div className="candidate-case-panel">
-          <div className="candidate-case-list">
-            {cases.map((c) => {
-              const summary = String(c.context || '').replace(/\s+/g, ' ').trim();
-              const snippet = summary.length > 220 ? `${summary.slice(0, 220)}...` : summary;
-              const signalKeys = Object.keys(c.financial_data || {}).slice(0, 4);
-              const caseModeLabel = getCaseModeLabel(c);
-              return (
-                <article className="candidate-case-card-horizontal" key={c.id} onClick={() => setSelectedCase(c)} style={{ cursor: 'pointer' }}>
-                  <div className="candidate-case-head-horizontal">
-                    <div>
-                      <div className="candidate-case-title">{c.title}</div>
-                      <div className="candidate-case-meta">{c.industry || 'General'} | Passing: {Math.round((Number(c.threshold_passing_score || 0.6) || 0.6) * 100)}%</div>
-                      <div className="candidate-case-meta" style={{ marginTop: '5px' }}>
-                        <span className="case-chip case-mode-chip">{caseModeLabel}</span>
-                      </div>
-                    </div>
-                    <button
-                      className="admin-btn primary"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        navigate(`/candidate/assessment/${c.id}`);
-                      }}
-                    >
-                      START CASE
-                    </button>
-                  </div>
-                  <div className="candidate-case-summary">{snippet || 'No summary available for this case.'}</div>
-                  <div className="candidate-signal-row">
-                    {signalKeys.length > 0 ? signalKeys.map((k) => (
-                      <span key={k} className="candidate-signal-pill">{String(k).replace(/_/g, ' ')}</span>
-                    )) : <span className="admin-hint">No key signals listed</span>}
-                  </div>
-                </article>
-              );
-            })}
-            {cases.length === 0 && (
-              <div className="admin-hint">No case studies available yet.</div>
-            )}
-          </div>
-        </div>
-
-        {selectedCase && (
-          <>
-            <div className="case-drawer-backdrop" onClick={() => setSelectedCase(null)} />
-            <aside className="case-drawer" role="dialog" aria-label="Case study details">
-              <div className="case-drawer-head">
-                <div>
-                  <div className="case-list-title">{selectedCase.title}</div>
-                  <div className="case-list-meta" style={{ marginTop: '6px' }}>
-                    {selectedCase.industry && <span className="case-chip">{selectedCase.industry}</span>}
-                    <span className="case-chip case-mode-chip">{getCaseModeLabel(selectedCase)}</span>
-                    <span className="case-chip">PASS {Math.round((Number(selectedCase.threshold_passing_score || 0.6) || 0.6) * 100)}%</span>
-                  </div>
-                </div>
-                <button className="icon-action-btn" onClick={() => setSelectedCase(null)} title="Close">✕</button>
-              </div>
-
-              <div className="drawer-actions">
-                <button className="admin-btn primary" onClick={() => navigate(`/candidate/assessment/${selectedCase.id}`)}>START CASE</button>
-              </div>
-
-              <div className="drawer-summary">
-                {getCaseSections(selectedCase).map((sec) => (
-                  <section className="drawer-section-card" key={sec.id}>
-                    <div className="drawer-section-title">{sec.heading}</div>
-                    {(() => {
-                      const { summary, entries } = splitSectionContent(sec.content);
-                      return (
-                        <>
-                          <div className="drawer-section-summary">{summary || 'No details available.'}</div>
-                          {entries.length > 0 && (
-                            <div className="drawer-entry-list">
-                              {entries.map((entry, index) => (
-                                entry.type === 'heading' ? (
-                                  <div key={`${sec.id}-h-${index}`} className="drawer-inline-heading">{entry.text}</div>
-                                ) : (
-                                  <div key={`${sec.id}-b-${index}`} className="drawer-bullet-item">{/question/i.test(String(sec.heading || '')) ? `${entries.slice(0, index + 1).filter((e) => e.type === 'bullet').length}. ${entry.text}` : entry.text}</div>
-                                )
-                              ))}
+        <section className="dashboard-main-grid single-column" style={{ display: 'grid', gridTemplateColumns: '1fr', width: '100%', gap: '20px' }}>
+          <div className="dashboard-panel transparent">
+            <div className="dashboard-panel-head">
+              <div className="dashboard-panel-title">AVAILABLE CASE STUDIES</div>
+              <div className="dashboard-panel-desc">Review each case summary and key signals before starting your assessment.</div>
+            </div>
+            <div className="activity-feed flex-grow">
+              {cases.length === 0 ? (
+                <div className="admin-hint">No case studies available yet.</div>
+              ) : (
+                <div className="cases-list" style={{ gap: '12px', display: 'flex', flexDirection: 'column' }}>
+                  {cases.map((c) => {
+                    const caseModeLabel = getCaseModeLabel(c);
+                    return (
+                      <div key={c.id} className="case-list-row clickable" onClick={() => setSelectedCase(c)}>
+                        <div className="case-list-leading">
+                          <div className="case-icon-box">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+                          </div>
+                          <div className="case-list-main">
+                            <div className="case-title-row">
+                              <div className="case-list-title">{c.title.toUpperCase()}</div>
+                              <span className="case-status-badge active">READY</span>
                             </div>
-                          )}
-                        </>
-                      );
-                    })()}
-                  </section>
-                ))}
-              </div>
-            </aside>
-          </>
-        )}
+                            <div className="case-list-meta-new">
+                              <span className="meta-tag">{c.industry?.toUpperCase() || 'GENERAL'}</span>
+                              <span className="meta-tag">{caseModeLabel.toUpperCase()}</span>
+                              <span className="meta-tag">PASS {Math.round((Number(c.threshold_passing_score || 0.6) || 0.6) * 100)}%</span>
+                            </div>
+                          </div>
+                        </div>
+                        <div className="case-row-actions" style={{ borderLeft: 'none' }}>
+                          <button
+                            className="admin-btn start"
+                            style={{ padding: '8px 16px', fontSize: '0.72rem', height: 'auto' }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigate(`/candidate/assessment/${c.id}`);
+                            }}
+                          >
+                            START CASE
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
+
+        <CaseStudyDrawer
+          caseStudy={selectedCase}
+          onClose={() => setSelectedCase(null)}
+          onStart={(id) => navigate(`/candidate/assessment/${id}`)}
+        />
       </div>
     </div>
   );
