@@ -108,7 +108,7 @@ const renderSectionContent = (content) => {
         }
 
         const isSubHeading = line.endsWith(':') && line.length <= 90 && !/^\d+[).]\s+/.test(line);
-        const bulletMatch = line.match(/^(?:[-*•]|\d+[).])\s+(.+)$/);
+        const bulletMatch = line.match(/^(?:[\-•●*]|\d+[).])\s*(.+)$/);
 
         if (isSubHeading) {
             flushList();
@@ -158,7 +158,7 @@ const parseSectionCards = (content = '') => {
         }
 
         const isSubHeading = line.endsWith(':') && line.length <= 90 && !/^\d+[).]\s+/.test(line);
-        const bulletMatch = line.match(/^(?:[-*•]|\d+[).])\s+(.+)$/);
+        const bulletMatch = line.match(/^(?:[\-•●*]|\d+[).])\s*(.+)$/);
 
         if (isSubHeading) {
             flushBlock();
@@ -1774,10 +1774,10 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                         })}
                     </div>
                     <div className="question-legend" aria-label="Question status legend">
-                        <span><i className="dot dot--grey" />Not attempted</span>
-                        <span><i className="dot dot--green" />Attempted and passed</span>
-                        <span><i className="dot dot--red" />Attempted and failed</span>
-                        <span><i className="dot dot--yellow" />Flagged for later</span>
+                        <span><span className="legend-arrow dot--grey">→</span> Not attempted</span>
+                        <span><span className="legend-arrow dot--green">→</span> Attempted and passed</span>
+                        <span><span className="legend-arrow dot--red">→</span> Attempted and failed</span>
+                        <span><span className="legend-arrow dot--yellow">→</span> Flagged for later</span>
                     </div>
                 </SidebarCard>
                     </>

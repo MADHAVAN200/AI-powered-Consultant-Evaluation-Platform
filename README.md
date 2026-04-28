@@ -6,7 +6,7 @@ An elite, AI-driven assessment engine designed to evaluate management consultant
 
 ---
 
-## 🏗 System Architecture & Flow
+## System Architecture & Flow
 
 ### 1. High-Level Architecture (C4 Model)
 The platform is built on a decoupled architecture ensuring separation of concerns between candidate experience, administrative management, and AI intelligence.
@@ -122,7 +122,7 @@ sequenceDiagram
 
 ---
 
-## 🚀 Core Capabilities
+## Core Capabilities
 
 ### AI Interview Engine
 *   **Live Conversational Assessment**: Conducts real-time, multi-step interviews using **Llama 3.3 (70B)** via Groq.
@@ -139,7 +139,7 @@ sequenceDiagram
 
 ---
 
-## 💻 Tech Stack
+## Tech Stack
 *   **Frontend**: React.js, Vite, Vanilla CSS.
 *   **Backend**: Node.js, Express.
 *   **AI/LLM**: Groq SDK (Llama 3.3 70B Versatile).
@@ -148,7 +148,7 @@ sequenceDiagram
 
 ---
 
-## ⚙️ Installation & Setup
+## Installation & Setup
 
 ### 1. Environment Configuration
 Create a `.env` file in the `backend/` directory:

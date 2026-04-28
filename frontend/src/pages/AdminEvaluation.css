@@ -2627,7 +2627,7 @@ details[open] .section-item-heading::before {
   display: grid;
   grid-template-columns: 1fr;
   gap: 20px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .dashboard-main-grid.half-half {
@@ -2644,12 +2644,16 @@ details[open] .section-item-heading::before {
   padding-right: 0;
   display: flex;
   flex-direction: column;
-  height: auto;
+  height: 100%;
+  flex: 1;
+  min-height: 0;
 }
 
 .dashboard-fixed {
   height: 100%;
-  overflow-y: auto;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .dashboard-panel {
@@ -2659,8 +2663,8 @@ details[open] .section-item-heading::before {
   display: flex;
   flex-direction: column;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.03), 0 1px 2px rgba(0, 0, 0, 0.04);
-  height: auto;
-  min-height: 400px;
+  flex: 1;
+  min-height: 0;
 }
 
 .dashboard-panel.transparent {
@@ -2710,7 +2714,7 @@ details[open] .section-item-heading::before {
   justify-content: space-around;
   gap: 15px;
   position: relative;
-  min-height: 0;
+  min-height: 200px;
 }
 
 .activity-avatar {
@@ -2735,11 +2739,12 @@ details[open] .section-item-heading::before {
 
 .chart-bar-fill {
   width: 44px;
-  background: #D0E7FF;
-  border-radius: 12px 12px 0 0;
+  background: linear-gradient(to top, var(--accent-primary), #58a6ff);
+  border-radius: 8px 8px 0 0;
   min-height: 4px;
   transition: height 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275);
   position: relative;
+  box-shadow: 0 4px 12px rgba(9, 105, 218, 0.2);
 }
 
 
