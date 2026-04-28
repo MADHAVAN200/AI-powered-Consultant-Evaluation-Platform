@@ -9,6 +9,7 @@ import CandidateResults from './pages/CandidateResults';
 import CandidateAssessment from './pages/CandidateAssessment';
 import LoginOverlay from './components/LoginOverlay';
 import { useData, DataProvider } from './context/DataContext';
+import { BreadcrumbProvider, useBreadcrumb } from './context/BreadcrumbContext';
 
 const getSystemTheme = () => (
   window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
@@ -90,6 +91,7 @@ const Sidebar = ({ navItems }) => {
 
 const TopBar = ({ theme, toggleTheme }) => {
   const { userRole } = useData();
+  const { breadcrumbs } = useBreadcrumb();
   const location = useLocation();
   const navItems = userRole === 'admin'
     ? adminNavItems
@@ -104,6 +106,31 @@ const TopBar = ({ theme, toggleTheme }) => {
       <div className="topbar-pill">
         <div className="topbar-left">
           <h2 className="header-title">{pageTitle}</h2>
+          
+          {breadcrumbs && breadcrumbs.length > 0 && (
+            <>
+              <div className="breadcrumb-v-divider"></div>
+              <div className="breadcrumb-path">
+                {breadcrumbs.map((crumb, idx) => (
+                  <React.Fragment key={idx}>
+                    <div 
+                      className={`breadcrumb-item ${crumb.active ? 'active' : ''} ${crumb.pill ? 'pill' : ''}`}
+                      onClick={crumb.onClick}
+                      style={{ cursor: crumb.onClick ? 'pointer' : 'default' }}
+                    >
+                      {crumb.icon && <span className="crumb-icon">{crumb.icon}</span>}
+                      <span>{crumb.label}</span>
+                    </div>
+                    {idx < breadcrumbs.length - 1 && (
+                      <div className="breadcrumb-sep">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                      </div>
+                    )}
+                  </React.Fragment>
+                ))}
+              </div>
+            </>
+          )}
         </div>
         <div className="topbar-right">
           <button className="topbar-icon-btn">
@@ -202,9 +229,11 @@ function AppContent() {
 function App() {
   return (
     <DataProvider>
-      <BrowserRouter>
-        <AppContent />
-      </BrowserRouter>
+      <BreadcrumbProvider>
+        <BrowserRouter>
+          <AppContent />
+        </BrowserRouter>
+      </BreadcrumbProvider>
     </DataProvider>
   );
 }
