@@ -2048,7 +2048,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                 )}
 
                 {activeCaseSection === 'simulation' && mockDrillEnabled && (
-                    <>
+                    <div className="simulation-workspace-pane">
                         <section className="simulation-hero" aria-label="Run simulations workspace">
                             <div>
                                 <p className="simulation-hero__eyebrow">Interactive Scenario Lab</p>
@@ -2068,7 +2068,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                             </div>
                         </section>
 
-                        <section className="metrics-deep-dive">
+                        <section className="metrics-deep-dive metrics-deep-dive--single">
                             <div className="table-card">
                                 <div className="table-card__header">
                                     <h3>Simulation Controls</h3>
@@ -2137,14 +2137,14 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                                         }}>
                                             Reset
                                         </button>
-                                        <button className="btn-primary" onClick={runSimulationForActiveQuestion} disabled={simulationLeversByGroup.length === 0}>
+                                        <button className="btn-primary btn-execute-simulation" onClick={runSimulationForActiveQuestion} disabled={simulationLeversByGroup.length === 0}>
                                             Execute Simulation
                                         </button>
                                     </div>
                                 </div>
                             </div>
                         </section>
-                        <section className="metrics-deep-dive">
+                        <section className="metrics-deep-dive metrics-deep-dive--single">
                             <div className="table-card">
                                 <div className="table-card__header">
                                     <h3>Simulation KPI Rail</h3>
@@ -2166,7 +2166,7 @@ const CandidateAssessment = ({ isDemo = false, isDirectCase = false }) => {
                                 </div>
                             </div>
                         </section>
-                    </>
+                    </div>
                 )}
                 </div>
             </main>

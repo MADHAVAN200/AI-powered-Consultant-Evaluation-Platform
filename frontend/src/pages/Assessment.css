@@ -2908,18 +2908,29 @@ body.assessment-lock {
     line-height: 1.35;
 }
 
+.simulation-workspace-pane {
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+    min-height: 100%;
+    width: 100%;
+    box-sizing: border-box;
+}
+
 .simulation-hero {
-    border: 1px solid var(--border-default);
-    border-radius: 12px;
-    padding: 14px;
-    background:
-        radial-gradient(1100px 220px at 5% 0%, rgba(31, 111, 235, 0.14), transparent 60%),
-        radial-gradient(900px 180px at 95% 0%, rgba(35, 134, 54, 0.12), transparent 55%),
+    border: none;
+    border-radius: 16px;
+    padding: 24px;
+    background: 
+        radial-gradient(1100px 220px at 5% 0%, rgba(31, 111, 235, 0.16), transparent 60%),
+        radial-gradient(900px 180px at 95% 0%, rgba(35, 134, 54, 0.14), transparent 55%),
         var(--bg-card);
     display: grid;
     grid-template-columns: 1.5fr 1fr;
     gap: 12px;
     align-items: center;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
 }
 
 .simulation-hero__eyebrow {
@@ -3004,10 +3015,11 @@ body.assessment-lock {
 }
 
 .simulation-group-card {
-    border: 1px solid var(--border-default);
-    border-radius: 10px;
-    padding: 10px;
-    background: var(--bg-subtle);
+    border: none;
+    border-radius: 12px;
+    padding: 16px;
+    background: var(--bg-card);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
 }
 
 .simulation-group-title {
@@ -3145,6 +3157,40 @@ body.assessment-lock {
 .btn-primary:disabled {
     cursor: not-allowed;
     opacity: 0.55;
+}
+
+.btn-execute-simulation {
+    background: #238636 !important; /* Vibrant Green */
+    color: #ffffff !important;
+    padding: 12px 28px !important;
+    border-radius: 8px !important;
+    font-size: 0.82rem !important;
+    font-weight: 800 !important;
+    box-shadow: 0 4px 14px rgba(35, 134, 54, 0.35) !important;
+    transition: all 0.24s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.btn-execute-simulation:hover:not(:disabled) {
+    background: #2ea043 !important;
+    transform: translateY(-1px);
+    box-shadow: 0 6px 18px rgba(35, 134, 54, 0.45) !important;
+}
+
+.btn-execute-simulation:active:not(:disabled) {
+    transform: translateY(0);
+}
+
+.simulation-workspace-pane .kpi-tile {
+    border: none !important;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05) !important;
+    background: var(--bg-card) !important;
+}
+
+.simulation-workspace-pane .kpi-tile:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08) !important;
 }
 
 /* ── Chat Dock Layout ────────────────────────────────────────── */
@@ -4077,6 +4123,21 @@ body.assessment-lock {
     color: #fff;
     border: none;
     box-shadow: 0 6px 14px rgba(31, 111, 235, 0.3);
+}
+
+/* Force Simulation Button Color */
+.candidate-assessment-layout .sidebar-section-btn--mock-drill,
+.admin-preview-layout .sidebar-section-btn--mock-drill {
+    background: linear-gradient(135deg, #1f6feb, #3b82f6) !important;
+    color: #ffffff !important;
+    box-shadow: 0 4px 12px rgba(31, 111, 235, 0.25) !important;
+    border: none !important;
+    margin-top: 12px !important;
+    opacity: 1 !important;
+}
+
+.candidate-assessment-layout .sidebar-section-btn--mock-drill:hover {
+    filter: brightness(1.1) !important;
 }
 
 .candidate-assessment-layout .question-tracker-summary,
